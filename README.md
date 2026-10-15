@@ -6,6 +6,45 @@ Neovim + tmux for people coming from VS Code. One command installs a pinned
 Neovim, its plugins and a matching tmux into your home directory, without root,
 on anything from CentOS 7 to a current laptop. Lessons are built in.
 
+It is for someone who knows VS Code and has never used Vim or tmux, or tried and
+got stuck: on a laptop, or on a remote server where you have no root and an old
+system. The editor keeps VS Code's habits where it can (find a file, search the
+project, a file tree, tabs, a command palette, Ctrl-s), and the lessons teach
+the Vim way one step at a time.
+
+## Features
+
+- **One install, no root.** Neovim, ripgrep, fd, fzf, lazygit and, on Linux
+  when the system's is older than 3.2, tmux go into your home directory, each at
+  an exact, sha256-checked version. A Neovim built for glibc 2.17 is used on
+  older systems.
+- **Lessons inside the editor.** 21 short lessons over six weeks, from "how do I
+  quit" to macros and `:g`. Each is one page you practise on in place; your copy
+  saves itself, `Space h r` gives a fresh one, and progress survives updates.
+- **Keys you can discover.** Press `Space` and wait: a popup lists every key that
+  can follow, with a description. `Space Space` is a command palette, and the
+  cheat sheets open inside the editor.
+- **Hints, not traps.** Arrows, the mouse and repeated keys all work. After a run
+  of slow presses, a one-line hint names the faster motion and the lesson that
+  teaches it, and only motions from lessons you have finished.
+- **Languages set up on first open.** Opening a Python, Go, Rust, C, JavaScript,
+  Lua, shell, HTML, CSS, JSON, YAML, TOML, Markdown, Docker, SQL or Java file
+  installs its language server and formatter in the background, and its
+  tree-sitter parser when a C compiler is present:
+  completion, go to definition, rename, problems inline, format on demand.
+- **The rest of the IDE.** Replace across files with a preview, git changes in
+  the gutter and lazygit, a three-way merge view and in-file conflict keys, a
+  debugger on `F5`/`F9`/`F10`/`F11`, terminals at the bottom or floating.
+- **tmux that matches.** The same colours and mode tiles as the editor,
+  `Ctrl-h/j/k/l` across editor splits and tmux panes alike, and copy that reaches
+  your own clipboard over SSH.
+- **A shell to match, opt in.** `rihla shell` adds suggestions from history,
+  fzf on Ctrl-R and Ctrl-T, folder jumps with zoxide and a prompt, for zsh or
+  bash; `--off` removes it.
+- **Easy to leave.** Your existing configs are backed up, `rihla uninstall` puts
+  them back, and your own settings live in `~/.config/rihla/`, which install,
+  update and uninstall leave alone.
+
 ## Install
 
 ```sh
@@ -30,7 +69,10 @@ set `https_proxy` first. For a machine without network, `rihla bundle` builds an
 
 1. Open a new terminal (or `export PATH="$HOME/.local/bin:$PATH"`).
 2. `rihla learn` opens lesson 0. To quit: `Esc`, then `:q`, Enter. The bar at
-   the top shows the keys for the next lesson and for getting back.
+   the top shows the keys for the next lesson and for getting back. Keys written
+   `Space h n` are pressed one after another: Space, let go, `h`, let go, `n`.
+   Neovim opens in Normal mode, where letters are commands: `i` starts typing
+   text, `Esc` stops.
 3. Lost (a second window, a popup, typing in the wrong place)? `Esc` twice, then
    `Space h h`.
 4. `nvim` opens the start screen. Press `Space` and wait: a popup lists every key
@@ -133,6 +175,11 @@ vim.keymap.set("n", "<leader>j", "<cmd>noh<CR>", { desc = "Clear search highligh
   fetched as tarballs where git is too old.
 - `~/.config/nvim` links to the Neovim config; `~/.tmux.conf` sources the tmux config.
   Both draw from one palette, `tmux/palette.conf`.
+- On the first file of a language, `lang.lua` looks it up in `langs.lua`: a server on
+  `PATH` is used as it is, otherwise mason installs one into your home and runs it
+  once to prove it starts on this glibc before enabling it.
+- tmux's `Ctrl-h/j/k/l` checks whether the pane is running nvim or fzf and passes
+  the key through if so; at the edge of nvim, vim-tmux-navigator hands it back.
 - Every change is journalled: an existing config is backed up, and `rihla uninstall`
   puts it back.
 
