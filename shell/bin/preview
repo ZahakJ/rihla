@@ -1,0 +1,45 @@
+#!/bin/sh
+# preview PATH [LINE]: what fzf shows beside the list in rgi, ff, Ctrl-T and Alt-C. A file
+# with line numbers, from a little above LINE with LINE marked (bat draws it when you have
+# bat); a directory's entries. Plain sh, awk and grep, so it works on any machine.
+f=${1:-}
+line=${2:-0}
+[ -n "$f" ] || exit 0
+# fzf lists may show the home directory as ~ (a literal tilde here).
+# shellcheck disable=SC2088
+case $f in "~/"*) f=$HOME/${f#"~/"} ;; esac
+if [ -d "$f" ]; then
+	ls -Ap "$f" 2>/dev/null | head -n 300
+	exit 0
+fi
+[ -r "$f" ] || {
+	echo "cannot read $f"
+	exit 0
+}
+case $line in '' | *[!0-9]*) line=0 ;; esac
+h=${FZF_PREVIEW_LINES:-40}
+case $h in '' | *[!0-9]*) h=40 ;; esac
+start=1
+if [ "$line" -gt 0 ]; then
+	start=$((line - h / 3))
+	[ "$start" -lt 1 ] && start=1
+fi
+end=$((start + h + 20))
+if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f" 2>/dev/null; then
+	echo "binary file, $(wc -c <"$f" | tr -d ' ') bytes"
+	exit 0
+fi
+for b in bat batcat; do
+	if command -v "$b" >/dev/null 2>&1; then
+		if [ "$line" -gt 0 ]; then
+			exec "$b" --color=always --style=numbers --paging=never --line-range "$start:$end" --highlight-line "$line" -- "$f"
+		fi
+		exec "$b" --color=always --style=numbers --paging=never --line-range "1:$end" -- "$f"
+	fi
+done
+# Line numbers in grey; the hit's line on a raised background with its number in yellow.
+awk -v s="$start" -v e="$end" -v l="$line" '
+	NR < s { next }
+	NR > e { exit }
+	NR == l { printf "\033[48;5;237m\033[38;5;223m%5d\033[39m %s\033[K\033[0m\n", NR, $0; next }
+	{ printf "\033[38;5;243m%5d\033[0m %s\n", NR, $0 }' "$f"

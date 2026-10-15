@@ -1,0 +1,7 @@
+# Written by install.sh into the installed copy.
+.rihla-source
+# Runtime artefacts that must never be committed.
+rihla-bundle-*.tar.gz
+*.rihla-tmp
+nvim/lazy-lock.json.bak
+__pycache__/

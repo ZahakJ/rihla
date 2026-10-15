@@ -1,0 +1,22 @@
+#!/bin/sh
+# tmux-ver MIN [BELOW]: succeeds when the running tmux server is >= MIN (and < BELOW).
+# tmux.conf uses it in if-shell to switch features on by version, so one config loads
+# cleanly on tmux 1.8 through 3.x.
+#
+# It asks the server binary itself (via $TMUX's pid and /proc on Linux) so a different
+# tmux earlier on PATH cannot confuse it; elsewhere it falls back to `tmux` on PATH.
+pid=${TMUX#*,}
+pid=${pid%%,*}
+bin=tmux
+if [ -n "$pid" ] && [ -x "/proc/$pid/exe" ]; then
+	bin=/proc/$pid/exe
+fi
+v=$("$bin" -V 2>/dev/null | sed -n 's/^[^0-9]*\([0-9][0-9.]*\).*/\1/p')
+[ -n "$v" ] || exit 1
+awk -v v="$v" -v lo="$1" -v hi="${2:-}" '
+function cmp(a, b,   x, y, na, nb, n, i) {
+	na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+	for (i = 1; i <= n; i++) { if (x[i] + 0 > y[i] + 0) return 1; if (x[i] + 0 < y[i] + 0) return -1 }
+	return 0
+}
+BEGIN { if (cmp(v, lo) < 0) exit 1; if (hi != "" && cmp(v, hi) >= 0) exit 1; exit 0 }'

@@ -1,0 +1,327 @@
+# rihla's shell layer for bash: what shell/zsh.rc gives zsh, as far as bash allows.
+#
+# Sourced by one line in your .bashrc, inside rihla's marked block, which `rihla shell`
+# adds and `rihla shell --off` (or `rihla uninstall`) removes. Each piece is skipped when
+# your shell already has its own:
+#
+#   prompt               starship with rihla's Catppuccin config (a plain bash prompt in
+#                        the same colours when starship cannot run here)
+#   autosuggestions and  ble.sh (bash 4.0+ and the usual POSIX tools, ps among
+#                        them; skipped on bash 3, e.g. macOS's /bin/bash)
+#   syntax highlighting
+#   search               rg and fd defaults (shell/ripgreprc, shell/fdignore), rgi (search
+#                        file contents, open the hit in nvim), ff (find a file, open it)
+#   fzf keys             Ctrl-R history, Ctrl-T files, Alt-C directories, **<Tab>, all
+#                        listing with fd and the same defaults
+#   zoxide               `z part-of-a-dir` jumps to a directory you have visited
+#   history              appended (not overwritten) from every terminal, large, no
+#                        duplicates (only while bash's defaults are in place)
+#   keys                 Ctrl-Left/Right by word, Up/Down search what you typed,
+#                        Tab completion lists and ignores case
+#
+# Prints nothing while the shell starts. What was switched on or skipped is kept in
+# $rihla_shell_on and $rihla_shell_skipped; `rihla shell status` shows both.
+# Turn single pieces off before this file is sourced, e.g. RIHLA_SHELL_NO="blesh zoxide".
+
+case $- in *i*) ;; *) return 0 ;; esac
+[ -n "${rihla_shell_loaded:-}" ] && return 0
+rihla_shell_loaded=1
+rihla_shell_on=
+rihla_shell_skipped=
+
+_rihla_tools=${RIHLA_TOOLS:-${XDG_DATA_HOME:-$HOME/.local/share}/rihla-tools}/shell
+_rihla_state=${XDG_STATE_HOME:-$HOME/.local/state}/rihla/shell
+_rihla_cfg=${RIHLA_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/rihla}
+_rihla_here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+_rihla_no=" ${RIHLA_SHELL_NO:-} "
+_rihla_off() { case $_rihla_no in *" $1 "*) rihla_shell_skipped="$rihla_shell_skipped $1:RIHLA_SHELL_NO"; return 0 ;; esac; return 1; }
+
+_rihla_icons=${RIHLA_ICONS:-}
+if [ -z "$_rihla_icons" ] && [ -r "$_rihla_cfg/icons" ]; then
+	read -r _rihla_icons <"$_rihla_cfg/icons"
+fi
+[ "$_rihla_icons" = nerd ] || _rihla_icons=ascii
+
+# rihla's starship and zoxide are run by their full path and never put on PATH: PATH is
+# passed on to tmux panes and nested shells, where a setup that picks its prompt by
+# `command -v starship` would switch to it. A starship or zoxide of yours on PATH wins.
+_rihla_bin() { # _rihla_bin NAME: prints the full path to run, yours first
+	if command -v "$1" >/dev/null 2>&1; then
+		type -P "$1"
+	elif [ -x "$_rihla_tools/bin/$1" ]; then
+		printf '%s\n' "$_rihla_tools/bin/$1"
+	else
+		return 1
+	fi
+}
+
+# What fzf, zoxide and starship print to set themselves up only changes with the program,
+# so it is kept in a file instead of starting each of them in every new shell. A cache is
+# used while it is newer than the program and this file and names the same program.
+# _rihla_cached NAME PROGRAM COMMAND...: prints the cache file, made first when needed.
+_rihla_cached() {
+	local f="$_rihla_state/init/$1.bash" p="$2" line out
+	shift 2
+	if [ -s "$f" ] && [ "$f" -nt "$p" ] && [ "$f" -nt "$_rihla_here/bash.rc" ]; then
+		IFS= read -r line <"$f"
+		[ "$line" = "# rihla cache: $p" ] && printf '%s\n' "$f" && return 0
+	fi
+	out=$("$@" 2>/dev/null) && [ -n "$out" ] || return 1
+	mkdir -p "$_rihla_state/init" 2>/dev/null
+	printf '# rihla cache: %s\n%s\n' "$p" "$out" >"$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null &&
+		printf '%s\n' "$f" && return 0
+	# Cannot write it: the text itself, to eval.
+	rm -f "$f.$$" 2>/dev/null
+	printf '%s\n' "$out" >"${TMPDIR:-/tmp}/rihla-init-$$" 2>/dev/null && printf '%s\n' "${TMPDIR:-/tmp}/rihla-init-$$"
+}
+
+# ------------------------------------------------------------ history
+_rihla_own_hist=
+[ "${HISTSIZE:-500}" -gt 1000 ] 2>/dev/null && _rihla_own_hist=1
+case ${HISTCONTROL:-} in '' | ignoreboth | ignoredups | ignorespace) ;; *) _rihla_own_hist=1 ;; esac
+if _rihla_off history; then :
+elif [ -n "$_rihla_own_hist" ]; then
+	rihla_shell_skipped="$rihla_shell_skipped history:yours"
+else
+	HISTSIZE=50000
+	HISTFILESIZE=50000
+	HISTCONTROL=ignoreboth:erasedups
+	shopt -s histappend cmdhist
+	# Write each command as it runs, so a second terminal (or tmux pane) sees it next time.
+	case ${PROMPT_COMMAND:-} in *"history -a"*) ;; *) PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;; esac
+	rihla_shell_on="$rihla_shell_on history"
+fi
+unset _rihla_own_hist
+
+# ------------------------------------------------------------ keys
+# Bound only where the key does nothing yet, or still does readline's default.
+if ! _rihla_off keys; then
+	_rihla_binds=$(bind -p 2>/dev/null)
+	_rihla_bind() { # _rihla_bind SEQ FUNCTION [DEFAULT-FUNCTION]
+		case $_rihla_binds in
+		*"\"$1\": ${3:-x-none-x}"*) bind "\"$1\": $2" ;;
+		*"\"$1\": "*) return 1 ;;
+		*) bind "\"$1\": $2" ;;
+		esac
+	}
+	_rihla_n=0
+	for _rihla_s in '\e[1;5C' '\e[5C' '\e[1;3C' '\e\e[C'; do _rihla_bind "$_rihla_s" forward-word && _rihla_n=1; done
+	for _rihla_s in '\e[1;5D' '\e[5D' '\e[1;3D' '\e\e[D'; do _rihla_bind "$_rihla_s" backward-word && _rihla_n=1; done
+	for _rihla_s in '\e[H' '\eOH' '\e[1~' '\e[7~'; do _rihla_bind "$_rihla_s" beginning-of-line && _rihla_n=1; done
+	for _rihla_s in '\e[F' '\eOF' '\e[4~' '\e[8~'; do _rihla_bind "$_rihla_s" end-of-line && _rihla_n=1; done
+	_rihla_bind '\e[3~' delete-char && _rihla_n=1
+	for _rihla_s in '\e[A' '\eOA'; do _rihla_bind "$_rihla_s" history-search-backward previous-history && _rihla_n=1; done
+	for _rihla_s in '\e[B' '\eOB'; do _rihla_bind "$_rihla_s" history-search-forward next-history && _rihla_n=1; done
+	_rihla_bind '\e[Z' menu-complete-backward && _rihla_n=1
+	if [ -z "${INPUTRC:-}" ] && [ ! -f "$HOME/.inputrc" ]; then
+		bind 'set show-all-if-ambiguous on'
+		bind 'set completion-ignore-case on'
+		bind 'set mark-symlinked-directories on'
+		[ "${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}" -ge 43 ] 2>/dev/null && bind 'set colored-stats on'
+		_rihla_n=1
+	fi
+	if [ "$_rihla_n" = 1 ]; then rihla_shell_on="$rihla_shell_on keys"; else rihla_shell_skipped="$rihla_shell_skipped keys:yours"; fi
+	unset -f _rihla_bind
+	unset _rihla_binds _rihla_n _rihla_s
+fi
+
+# ------------------------------------------------------------ search: rg, fd, rgi, ff
+# The same defaults as the editor (docs/shell.md, Defaults): hidden files on, symlinks
+# followed, .git, node_modules and the like left out.
+_rihla_fd=
+if command -v fd >/dev/null 2>&1; then _rihla_fd=fd
+elif command -v fdfind >/dev/null 2>&1; then _rihla_fd=fdfind # Debian and Ubuntu name it so
+fi
+_rihla_fdo=
+[ -n "$_rihla_fd" ] && _rihla_fdo="--hidden --follow --ignore-file $(printf '%q' "$_rihla_here/fdignore")"
+if _rihla_off search; then :
+else
+	[ -z "${RIPGREP_CONFIG_PATH:-}" ] && [ -r "$_rihla_here/ripgreprc" ] && export RIPGREP_CONFIG_PATH="$_rihla_here/ripgreprc"
+	if [ -n "$_rihla_fd" ] && ! alias "$_rihla_fd" >/dev/null 2>&1 && ! declare -F "$_rihla_fd" >/dev/null 2>&1; then
+		# shellcheck disable=SC2139 # expanded now, on purpose
+		alias "$_rihla_fd=$_rihla_fd $_rihla_fdo"
+	fi
+	# rgi, ff (and fdi, the same as ff): small scripts next to this file. A command, alias
+	# or function of yours by that name wins.
+	for _rihla_s in rgi ff fdi; do
+		type "$_rihla_s" >/dev/null 2>&1 && continue
+		_rihla_t=$_rihla_s
+		[ "$_rihla_s" = fdi ] && _rihla_t=ff
+		eval "$_rihla_s() { sh $(printf '%q' "$_rihla_here/bin/$_rihla_t") \"\$@\"; }"
+	done
+	rihla_shell_on="$rihla_shell_on search"
+fi
+
+# ------------------------------------------------------------ fzf
+if _rihla_off fzf; then :
+elif declare -F __fzf_history__ >/dev/null 2>&1 || declare -F __fzf_select__ >/dev/null 2>&1; then
+	rihla_shell_skipped="$rihla_shell_skipped fzf:yours"
+elif command -v fzf >/dev/null 2>&1 && _rihla_f=$(_rihla_cached fzf "$(type -P fzf)" fzf --bash) &&
+	grep -q __fzf_history__ "$_rihla_f" 2>/dev/null; then
+	if [ -z "${FZF_DEFAULT_OPTS:-}${FZF_DEFAULT_OPTS_FILE:-}" ]; then
+		export FZF_DEFAULT_OPTS="--height=50% --min-height=12 --layout=reverse --border=rounded --info=inline \
+--color=bg+:#313244,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#cba6f7,\
+marker:#a6e3a1,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8,border:#6c7086"
+	fi
+	if command -v fd >/dev/null 2>&1; then
+		: "${FZF_DEFAULT_COMMAND:=$_rihla_fd --type f $_rihla_fdo}"
+		: "${FZF_CTRL_T_COMMAND:=$_rihla_fd $_rihla_fdo}"
+		: "${FZF_ALT_C_COMMAND:=$_rihla_fd --type d $_rihla_fdo}"
+		export FZF_DEFAULT_COMMAND FZF_CTRL_T_COMMAND FZF_ALT_C_COMMAND
+		# **<Tab> lists with fd too (fzf calls these with the directory to list).
+		declare -F _fzf_compgen_path >/dev/null 2>&1 ||
+			eval "_fzf_compgen_path() { $_rihla_fd $_rihla_fdo . \"\$1\" 2>/dev/null; }"
+		declare -F _fzf_compgen_dir >/dev/null 2>&1 ||
+			eval "_fzf_compgen_dir() { $_rihla_fd --type d $_rihla_fdo . \"\$1\" 2>/dev/null; }"
+	fi
+	# A preview of the file (bat when you have it) or the directory under the cursor.
+	# shellcheck disable=SC2089,SC2090 # fzf reads these as words with quotes
+	_rihla_p="--height=80% --preview 'sh $(printf '%q' "$_rihla_here/bin/preview") {}' --preview-window 'right,55%,border-left,<100(down,50%,border-top)'"
+	: "${FZF_CTRL_T_OPTS:=$_rihla_p}"
+	: "${FZF_ALT_C_OPTS:=$_rihla_p}"
+	# shellcheck disable=SC2090
+	export FZF_CTRL_T_OPTS FZF_ALT_C_OPTS
+	# shellcheck disable=SC1090
+	. "$_rihla_f"
+	rihla_shell_on="$rihla_shell_on fzf"
+else
+	rihla_shell_skipped="$rihla_shell_skipped fzf:no-fzf-0.48+"
+fi
+
+# ------------------------------------------------------------ zoxide
+if _rihla_off zoxide; then :
+elif declare -F __zoxide_z >/dev/null 2>&1 || declare -F z >/dev/null 2>&1 || alias z >/dev/null 2>&1; then
+	rihla_shell_skipped="$rihla_shell_skipped zoxide:yours"
+elif _rihla_x=$(_rihla_bin zoxide) && _rihla_f=$(_rihla_cached zoxide "$_rihla_x" "$_rihla_x" init bash); then
+	[ -n "${_ZO_DATA_DIR:-}" ] || export _ZO_DATA_DIR="$_rihla_state/zoxide"
+	[ -d "$_ZO_DATA_DIR" ] || mkdir -p "$_ZO_DATA_DIR" 2>/dev/null
+	# zoxide's functions call `\command zoxide`; rihla's copy is not on PATH, so they get
+	# its full path instead.
+	_rihla_init=$(<"$_rihla_f")
+	_rihla_q=$(printf '%q' "$_rihla_x")
+	eval "${_rihla_init//'\command zoxide'/$_rihla_q}"
+	rihla_shell_on="$rihla_shell_on zoxide"
+else
+	rihla_shell_skipped="$rihla_shell_skipped zoxide:not-installed"
+fi
+
+# ------------------------------------------------------------ prompt
+# Yours wins: starship, oh-my-bash, bash-it, a git prompt, or any PS1 that is not a
+# distribution's default. Starship is recognised by the function its init defines in this
+# shell, not by $STARSHIP_SHELL: that one is exported, so a tmux pane or a nested bash
+# inherits it from the shell that started it without having a prompt.
+_rihla_mine=
+if declare -F starship_precmd >/dev/null 2>&1; then _rihla_mine=starship
+elif [ -n "${OSH:-}" ]; then _rihla_mine=oh-my-bash
+elif [ -n "${BASH_IT:-}" ]; then _rihla_mine=bash-it
+else
+	case $PS1 in
+	'\s-\v\$ ' | '[\u@\h \W]\$ ' | '\u@\h:\w\$ ' | '\h:\W \u\$ ' | '${debian_chroot:+($debian_chroot)}\u@\h:\w\$ ' | \
+		'${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ ' | '') ;;
+	*) _rihla_mine=your-own-PS1 ;;
+	esac
+fi
+if _rihla_off prompt; then :
+elif [ -n "$_rihla_mine" ]; then
+	rihla_shell_skipped="$rihla_shell_skipped prompt:$_rihla_mine"
+elif _rihla_x=$(_rihla_bin starship) && { [ -n "${STARSHIP_CACHE:-}" ] || export STARSHIP_CACHE="$_rihla_state/starship"; } &&
+	_rihla_f=$(_rihla_cached starship "$_rihla_x" "$_rihla_x" init bash --print-full-init); then
+	# rihla's own config, also when inherited from the shell that started this one (a tmux
+	# pane, a nested shell; zsh's async variant too), is chosen again here.
+	case ${STARSHIP_CONFIG:-} in "$_rihla_here"/starship-*.toml | "$_rihla_state"/init/starship-*-async.toml) STARSHIP_CONFIG= ;; esac
+	if [ -z "${STARSHIP_CONFIG:-}" ]; then
+		if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml" ]; then
+			export STARSHIP_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml"
+		else
+			export STARSHIP_CONFIG="$_rihla_here/starship-$_rihla_icons.toml"
+		fi
+	fi
+	# Its setup has its own full path in it (or that of a starship on PATH).
+	# shellcheck disable=SC1090
+	. "$_rihla_f"
+	rihla_shell_on="$rihla_shell_on prompt:starship"
+else
+	# The directory in a blue block (like the current window in rihla's tmux bar), the git
+	# branch in mauve, a green or red arrow. Rebuilt before each prompt, first thing, so
+	# the arrow sees the exit status of your command.
+	if [ "${COLORTERM:-}" = truecolor ] || [ "${COLORTERM:-}" = 24bit ]; then
+		_rihla_pc=('\[\e[38;2;137;180;250m\]' '\[\e[38;2;203;166;247m\]' '\[\e[38;2;166;227;161m\]'
+			'\[\e[38;2;243;139;168m\]' '\[\e[38;2;17;17;27;48;2;137;180;250m\]')
+	else
+		_rihla_pc=('\[\e[38;5;111m\]' '\[\e[38;5;183m\]' '\[\e[38;5;151m\]' '\[\e[38;5;211m\]'
+			'\[\e[38;5;233;48;5;111m\]')
+	fi
+	if [ "$_rihla_icons" = nerd ]; then
+		_rihla_pi=($'' $'' $' ' $'❯')
+	else
+		_rihla_pi=('' '' 'on ' '>')
+	fi
+	_rihla_ps1() {
+		local s=$? b o='\[\e[0m\]' h=
+		b=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null)
+		[ -n "$b" ] && b="${_rihla_pc[1]}${_rihla_pi[2]}$b$o "
+		[ -n "${SSH_CONNECTION:-}" ] && h="${_rihla_pc[1]}\h$o "
+		PS1="$h${_rihla_pc[0]}${_rihla_pi[0]}${_rihla_pc[4]} \w $o${_rihla_pc[0]}${_rihla_pi[1]}$o $b"
+		if [ $s = 0 ]; then PS1="$PS1${_rihla_pc[2]}"; else PS1="$PS1${_rihla_pc[3]}"; fi
+		PS1="$PS1${_rihla_pi[3]}$o "
+		return $s
+	}
+	PROMPT_COMMAND="_rihla_ps1${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+	rihla_shell_on="$rihla_shell_on prompt:bash"
+fi
+
+# ------------------------------------------------------------ ble.sh
+# Autosuggestions (Right arrow or End accepts) and syntax highlighting for bash. Loaded
+# last: it takes over the line editor. Needs bash 4.0+ (CentOS 7 has 4.2).
+if _rihla_off blesh; then :
+elif [ -n "${BLE_VERSION:-}" ]; then
+	rihla_shell_skipped="$rihla_shell_skipped blesh:yours"
+elif [ "${BASH_VERSINFO[0]}" -lt 4 ] 2>/dev/null; then
+	rihla_shell_skipped="$rihla_shell_skipped blesh:bash-${BASH_VERSION%%(*}-too-old"
+elif [ ! -f "$_rihla_tools/blesh/ble.sh" ]; then
+	rihla_shell_skipped="$rihla_shell_skipped blesh:not-installed"
+elif _rihla_m=$(for _rihla_s in sed date rm mkdir mkfifo sleep stty tty sort awk chmod grep cat wc mv sh od cp ps; do
+	command -v "$_rihla_s" >/dev/null 2>&1 || printf ',%s' "$_rihla_s"
+done) && [ -n "$_rihla_m" ]; then
+	# ble.sh refuses to load (with two lines of complaint at every prompt start) when one
+	# of these is missing; minimal containers often lack ps (procps).
+	rihla_shell_skipped="$rihla_shell_skipped blesh:missing-${_rihla_m#,}"
+elif [ ! -t 0 ] || [ ! -t 1 ]; then
+	# Not in a terminal (bash -i -c from a script): ble.sh would refuse anyway.
+	rihla_shell_skipped="$rihla_shell_skipped blesh:needs-a-terminal"
+else
+	# shellcheck disable=SC1091
+	source "$_rihla_tools/blesh/ble.sh" --attach=prompt --rcfile=/dev/null
+	if [ -n "${BLE_VERSION:-}" ]; then
+		# Show the suggestion 20 ms after the last key.
+		bleopt complete_auto_delay=20 2>/dev/null
+		bleopt prompt_ps1_transient= 2>/dev/null
+		ble-face -s auto_complete fg=#6c7086 2>/dev/null
+		ble-face -s syntax_command fg=#a6e3a1 2>/dev/null
+		ble-face -s command_builtin fg=#a6e3a1 2>/dev/null
+		ble-face -s command_alias fg=#a6e3a1 2>/dev/null
+		ble-face -s command_function fg=#a6e3a1 2>/dev/null
+		ble-face -s command_file fg=#a6e3a1 2>/dev/null
+		ble-face -s command_keyword fg=#cba6f7 2>/dev/null
+		ble-face -s syntax_error fg=#f38ba8 2>/dev/null
+		ble-face -s command_directory fg=#89b4fa,underline 2>/dev/null
+		ble-face -s syntax_quoted fg=#f9e2af 2>/dev/null
+		ble-face -s syntax_quotation fg=#f9e2af 2>/dev/null
+		ble-face -s syntax_comment fg=#6c7086 2>/dev/null
+		ble-face -s filename_directory fg=#89b4fa,underline 2>/dev/null
+		# ble.sh reads keys itself and does not see the readline `bind -x` bindings fzf
+		# makes for Ctrl-T and Ctrl-R (Ctrl-R would be ble.sh's own search): the same
+		# widgets again, in ble.sh's keymaps. (Alt-C is a readline macro and works.)
+		if declare -F fzf-file-widget >/dev/null 2>&1 && declare -F __fzf_history__ >/dev/null 2>&1; then
+			blehook/eval-after-load keymap_emacs 'ble-bind -m emacs -x C-t fzf-file-widget; ble-bind -m emacs -x C-r __fzf_history__' 2>/dev/null
+			blehook/eval-after-load keymap_vi 'ble-bind -m vi_imap -x C-t fzf-file-widget; ble-bind -m vi_imap -x C-r __fzf_history__' 2>/dev/null
+		fi
+		rihla_shell_on="$rihla_shell_on blesh"
+	fi
+fi
+
+rihla_shell_on=${rihla_shell_on# }
+rihla_shell_skipped=${rihla_shell_skipped# }
+unset -f _rihla_off _rihla_bin _rihla_cached
+unset _rihla_tools _rihla_state _rihla_cfg _rihla_here _rihla_no _rihla_icons _rihla_mine \
+	_rihla_x _rihla_init _rihla_q _rihla_m _rihla_s _rihla_t _rihla_f _rihla_p _rihla_fd _rihla_fdo

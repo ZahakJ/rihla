@@ -1,0 +1,53 @@
+#!/bin/sh
+# The battery segment of the tmux bar: "#[fg=..]<icon> 87%", or nothing when the machine
+# runs on mains only (desktops, servers, containers). A mouse or headset battery is not
+# the machine's and is skipped.
+#
+#   battery ICONS C_OK C_LOW C_CHARGING
+#
+# Linux: /sys/class/power_supply. macOS: pmset. tmux runs it once per status-interval.
+icons=${1:-ascii}
+c_ok=${2:-default}
+c_low=${3:-default}
+c_chg=${4:-default}
+
+pct=
+state=
+for b in /sys/class/power_supply/*; do
+	[ -r "$b/capacity" ] || continue
+	[ "$(cat "$b/type" 2>/dev/null)" = Battery ] || continue
+	[ "$(cat "$b/scope" 2>/dev/null)" = Device ] && continue
+	pct=$(cat "$b/capacity" 2>/dev/null)
+	state=$(cat "$b/status" 2>/dev/null)
+	break
+done
+if [ -z "$pct" ] && command -v pmset >/dev/null 2>&1; then
+	line=$(pmset -g batt 2>/dev/null | sed -n 's/.*[[:space:]]\([0-9][0-9]*\)%; *\([a-zA-Z ]*\).*/\1 \2/p' | head -n 1)
+	pct=${line%% *}
+	case $line in *" charging"* | *" charged"* | *"AC attached"*) state=Charging ;; *) state=Discharging ;; esac
+fi
+case $pct in '' | *[!0-9]*) exit 0 ;; esac
+
+c=$c_ok
+[ "$pct" -le 20 ] && c=$c_low
+case $state in Charging | Full) c=$c_chg ;; esac
+if [ "$icons" = nerd ]; then
+	# Nerd Font battery glyphs (U+F0079 full, U+F007A..U+F0082 for 10..90 %, U+F0084 charging).
+	case $state in
+	Charging) i='\363\260\202\204' ;;
+	*)
+		if [ "$pct" -ge 95 ]; then i='\363\260\201\271'
+		elif [ "$pct" -ge 75 ]; then i='\363\260\202\201'
+		elif [ "$pct" -ge 55 ]; then i='\363\260\201\277'
+		elif [ "$pct" -ge 35 ]; then i='\363\260\201\275'
+		elif [ "$pct" -ge 15 ]; then i='\363\260\201\273'
+		else i='\363\260\201\272'
+		fi
+		;;
+	esac
+	# shellcheck disable=SC2059
+	printf "#[fg=%s]$i %s%%\n" "$c" "$pct"
+else
+	case $state in Charging) s='+' ;; *) s='' ;; esac
+	printf '#[fg=%s]bat %s%%%s\n' "$c" "$pct" "$s"
+fi

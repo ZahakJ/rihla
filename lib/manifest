@@ -1,0 +1,88 @@
+# Pinned artifacts. Bumping a tool is a change to this file only.
+#
+# Columns (whitespace separated):
+#   asset <tool> <version> <os> <arch> <min-glibc> <format> <sha256> <url> <binary-path-inside-archive>
+#   floor <tool> <version>   (a system copy at or above this version is used as it is)
+#
+# <os> and <arch> are "any" for scripts (the shell layer's zsh plugins, ble.sh); <format> is
+# tar.gz, tar.xz or gz. <min-glibc> is "-" for static or macOS builds. For one tool/os/arch
+# the first row the host satisfies wins, so the preferred (official) build comes first and
+# the most compatible one last. sha256 values are GitHub's asset digests.
+#
+# Neovim: the official Linux build needs glibc 2.34; neovim/neovim-releases publishes the
+# same release built against glibc 2.17 (CentOS 7, RHEL 8, Ubuntu 20.04).
+asset nvim 0.12.5 linux x86_64 2.34 tar.gz bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875 https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-linux-x86_64.tar.gz nvim-linux-x86_64/bin/nvim
+asset nvim 0.12.5 linux x86_64 2.17 tar.gz 9e4a0e9c2aebbcf1eb5f6cdf645b460c9249f517650d0191170f9f152ecfd721 https://github.com/neovim/neovim-releases/releases/download/v0.12.5/nvim-linux-x86_64.tar.gz nvim-linux-x86_64/bin/nvim
+asset nvim 0.12.5 linux arm64 2.34 tar.gz 1aa5ca085249580ae0f91eb14f27ec0919773ff2d99a163d03f3d6c21ac29725 https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-linux-arm64.tar.gz nvim-linux-arm64/bin/nvim
+asset nvim 0.12.5 linux arm64 2.17 tar.gz b59063930b3ec62aed6257a4a388d33939c2d8804cce5723836659f7feef876c https://github.com/neovim/neovim-releases/releases/download/v0.12.5/nvim-linux-arm64.tar.gz nvim-linux-arm64/bin/nvim
+asset nvim 0.12.5 darwin arm64 - tar.gz 65fb000099e47ca1b762584c484cc833f40e30851a0ec450d4174e16317c1f9b https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-macos-arm64.tar.gz nvim-macos-arm64/bin/nvim
+asset nvim 0.12.5 darwin x86_64 - tar.gz 81f4518622cb059b450ee2e498c6a1082a222f6bd89589de5bbcf0c6a68aa3fd https://github.com/neovim/neovim/releases/download/v0.12.5/nvim-macos-x86_64.tar.gz nvim-macos-x86_64/bin/nvim
+
+# ripgrep: static musl builds on Linux.
+asset rg 15.2.0 linux x86_64 - tar.gz 33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz ripgrep-15.2.0-x86_64-unknown-linux-musl/rg
+asset rg 15.2.0 linux arm64 - tar.gz 800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz ripgrep-15.2.0-aarch64-unknown-linux-musl/rg
+asset rg 15.2.0 darwin arm64 - tar.gz 3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz ripgrep-15.2.0-aarch64-apple-darwin/rg
+asset rg 15.2.0 darwin x86_64 - tar.gz af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-apple-darwin.tar.gz ripgrep-15.2.0-x86_64-apple-darwin/rg
+
+# fd: static musl builds on Linux.
+asset fd 10.5.0 linux x86_64 - tar.gz 761c72dc8e120d85b22292063be8a796e2eeb20eb3e4f38b8fa2343ccf3514a7 https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-x86_64-unknown-linux-musl.tar.gz fd-v10.5.0-x86_64-unknown-linux-musl/fd
+asset fd 10.5.0 linux arm64 - tar.gz d76c4317f7d5dba69f8a2a15856c90c777e7f0dd4e85f0de8c76de6992c374d4 https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-aarch64-unknown-linux-musl.tar.gz fd-v10.5.0-aarch64-unknown-linux-musl/fd
+asset fd 10.5.0 darwin arm64 - tar.gz b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12 https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-aarch64-apple-darwin.tar.gz fd-v10.5.0-aarch64-apple-darwin/fd
+asset fd 10.5.0 darwin x86_64 - tar.gz 7e31028c62c6955877735d0406807aa484c2a5e6f86235a59e26c29c301da590 https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-x86_64-apple-darwin.tar.gz fd-v10.5.0-x86_64-apple-darwin/fd
+
+# fzf: Go, statically linked.
+asset fzf 0.74.4 linux x86_64 - tar.gz 05e6813a337cc722c3ed07e54a764b75cc5d671e2e60459db0ba696ee5fa7504 https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-linux_amd64.tar.gz fzf
+asset fzf 0.74.4 linux arm64 - tar.gz 5d673b849f494f0d64ec471d8640b153ca8849e3846a31da17abdcfce8df6b46 https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-linux_arm64.tar.gz fzf
+asset fzf 0.74.4 darwin arm64 - tar.gz 4f6a113bfc0c7959e0005c78d566a51afc4fcefc956f43735c62a9deb19e92ae https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-darwin_arm64.tar.gz fzf
+asset fzf 0.74.4 darwin x86_64 - tar.gz 2d392b50be66e2ab104ccd52a6072df692b1f9b9c5b449a9c098de885f32c4c5 https://github.com/junegunn/fzf/releases/download/v0.74.4/fzf-0.74.4-darwin_amd64.tar.gz fzf
+
+# lazygit: Go, statically linked. Optional (skipped with --minimal).
+asset lazygit 0.65.1 linux x86_64 - tar.gz 02beacbcda0fa342e50ae3480ba8147307353af3fb28e1d5f790e02329c201a6 https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_linux_x86_64.tar.gz lazygit
+asset lazygit 0.65.1 linux arm64 - tar.gz 49abecdf6adf4f2dfdb11bf7b9bfada267ea523612ed809d1c6d87f6c04000a7 https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_linux_arm64.tar.gz lazygit
+asset lazygit 0.65.1 darwin arm64 - tar.gz 65a367c6ea9a88efebaaf7998a6835eedb987e04916cef677264ff9b31b1b13e https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_darwin_arm64.tar.gz lazygit
+asset lazygit 0.65.1 darwin x86_64 - tar.gz fde13daf583511aa24c42ca154911643231a5af784c7cdd8117264b2fc035b33 https://github.com/jesseduffield/lazygit/releases/download/v0.65.1/lazygit_0.65.1_darwin_x86_64.tar.gz lazygit
+
+# tmux: fully static (musl + ncurses + libevent) builds from mjakob-gh/build-static-tmux,
+# built by that repo's GitHub Actions from upstream sources. 3.6b is the newest release
+# with both amd64 and arm64 assets. There is no macOS build: macOS uses the system or
+# Homebrew tmux.
+asset tmux 3.6b linux x86_64 - gz fdcae78ea948d721172fae45853abbaba8ceaa1b3769ad3ab7cad3771fb5230d https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6b/tmux.linux-amd64.gz tmux
+asset tmux 3.6b linux arm64 - gz ca582d2d6783d0053c36ab8b0a570e744e486b323be2c83cb473a5b9fa881a45 https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.6b/tmux.linux-arm64.gz tmux
+
+# ---------------------------------------------------------------- shell layer
+# Installed only by `rihla shell` (or `install --shell`), into rihla-tools/shell.
+#
+# starship: static musl builds on Linux, so it runs on any glibc (CentOS 7 included).
+asset starship 1.26.0 linux x86_64 - tar.gz b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3 https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-musl.tar.gz starship
+asset starship 1.26.0 linux arm64 - tar.gz dc30189378d2f2e287384e8a692d3f95ad1df64cf0e8c36aa9201516028aed6b https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-unknown-linux-musl.tar.gz starship
+asset starship 1.26.0 darwin arm64 - tar.gz c40b27b11f580411e068f2fa6c1be7830a387c0bc47a94d1d37f32b054c5361d https://github.com/starship/starship/releases/download/v1.26.0/starship-aarch64-apple-darwin.tar.gz starship
+asset starship 1.26.0 darwin x86_64 - tar.gz 5548f406a4b6f5695903bdea83f77ce47ec12c8c0e62dabd33122d8f133e4207 https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-apple-darwin.tar.gz starship
+# zoxide: static musl builds on Linux.
+asset zoxide 0.10.0 linux x86_64 - tar.gz 2d93385b99f3e82cf2701609a1bffcad863fbeb75aa3fe7eb6be4d29be68b1ae https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-x86_64-unknown-linux-musl.tar.gz zoxide
+asset zoxide 0.10.0 linux arm64 - tar.gz f1f16c5d6298d63dee467eedea1cdcd8490e43e493bea43acd416dc9033ef641 https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-aarch64-unknown-linux-musl.tar.gz zoxide
+asset zoxide 0.10.0 darwin arm64 - tar.gz b55ae6f2f5f23d0a6ccb3bd4eeb2af9c7e0a6556e5255c82100e40305129bbb0 https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-aarch64-apple-darwin.tar.gz zoxide
+asset zoxide 0.10.0 darwin x86_64 - tar.gz 18ab7ae2633ad6e2ab79a4e665cbba1e95b7c872d44523326efb793202451dad https://github.com/ajeetdsouza/zoxide/releases/download/v0.10.0/zoxide-0.10.0-x86_64-apple-darwin.tar.gz zoxide
+# zsh plugins, as GitHub tarballs of the tagged commit (the version column is the tag).
+# Both plugins support zsh 4.3.11 and newer, so CentOS 7's zsh 5.0.2 is covered;
+# zsh-syntax-highlighting rather than fast-syntax-highlighting, which needs zsh 5.0.8+.
+asset zsh-autosuggestions 0.7.1 any any - tar.gz 166fad9326c99904fd3b16b5d770efb4f5df39a674599e72bba8fc41636ab065 https://codeload.github.com/zsh-users/zsh-autosuggestions/tar.gz/e52ee8ca55bcc56a17c828767a3f98f22a68d4eb zsh-autosuggestions-e52ee8ca55bcc56a17c828767a3f98f22a68d4eb/zsh-autosuggestions.zsh
+asset zsh-syntax-highlighting 0.8.0 any any - tar.gz 874999413d147b7ad6776077e1b756d31d68284f9ef2ef240b33a4c842f0e1d8 https://codeload.github.com/zsh-users/zsh-syntax-highlighting/tar.gz/db085e4661f6aafd24e5acb5b2e17e4dd5dddf3e zsh-syntax-highlighting-db085e4661f6aafd24e5acb5b2e17e4dd5dddf3e/zsh-syntax-highlighting.zsh
+asset zsh-completions 0.36.0 any any - tar.gz 84d692bfaaff3c27eb08da5f917c68f45727003253795a6a40dfbc8e314f607b https://codeload.github.com/zsh-users/zsh-completions/tar.gz/28c5bdcaf81bb89e56d0df8267d822c3b8aed9e0 zsh-completions-28c5bdcaf81bb89e56d0df8267d822c3b8aed9e0/zsh-completions.plugin.zsh
+# fish: the official static Linux builds (static-pie, no libc needed, so CentOS 7 runs
+# them; unpacking needs xz). Used only by `rihla shell --fish`, in rihla's tmux. No macOS
+# tarball upstream: there a system fish 3.6+ (brew install fish) is used.
+asset fish 4.9.3 linux x86_64 - tar.xz 8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095 https://github.com/fish-shell/fish-shell/releases/download/4.9.3/fish-4.9.3-linux-x86_64.tar.xz fish
+asset fish 4.9.3 linux arm64 - tar.xz 57349f0111728c64b703a84e611aa97ff4d1fa8466385d64e67bd5bc3ffa49fc https://github.com/fish-shell/fish-shell/releases/download/4.9.3/fish-4.9.3-linux-aarch64.tar.xz fish
+# ble.sh: autosuggestions and syntax highlighting for bash (4.0+; unpacking needs xz).
+asset blesh 0.4.0-devel3 any any - tar.xz c8612ee612bc6b10dbfd6e85c6cbdfd7caf152a12d1f9de22ea0a9d735b3080c https://github.com/akinomyoga/ble.sh/releases/download/v0.4.0-devel3/ble-0.4.0-devel3.tar.xz ble-0.4.0-devel3/ble.sh
+
+floor rg 13.0
+floor fd 8.0
+floor fzf 0.48
+floor lazygit 0.40
+# 3.2 is the first tmux with display-popup and terminal-features. Older tmux still loads
+# the config, with fewer features.
+floor tmux 3.2
+# lazy.nvim clones with --filter=blob:none, which needs git 2.19. Below that (or with no
+# git) plugins are fetched as tarballs instead.
+floor git 2.19

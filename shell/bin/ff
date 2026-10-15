@@ -1,0 +1,31 @@
+#!/bin/sh
+# ff [PATTERN [PATH...]] (also fdi): find a file by name and open it in nvim. PATTERN is a
+# regular expression on the name (fd); then type to narrow the list (fuzzy). Hidden files
+# are listed; .git, node_modules and the like are not (shell/fdignore). Tab marks several,
+# Enter opens the marked ones (or the one under the cursor). Examples:
+#   ff                    every file below here
+#   ff '\.py$' src        Python files under src/
+here=$(cd "$(dirname "$0")" && pwd -P)
+command -v fzf >/dev/null 2>&1 || {
+	echo "ff: needs fzf (rihla install brings it)" >&2
+	exit 1
+}
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+ed="vi"
+for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
+fd=
+for c in fd fdfind; do command -v "$c" >/dev/null 2>&1 && fd=$c && break; done
+list() {
+	if [ -n "$fd" ]; then
+		"$fd" --type f --hidden --follow --ignore-file "$here/../fdignore" --color=never "$@" </dev/null
+	else
+		# No fd: find, without the ignored names (no .gitignore then).
+		find "${2:-.}" \( -name .git -o -name node_modules -o -name .venv -o -name __pycache__ \) -prune -o -type f -print 2>/dev/null |
+			sed 's|^\./||' | grep -E -- "${1:-.}"
+	fi
+}
+list "$@" | SHELL=/bin/sh fzf --multi --prompt 'file> ' \
+	--height=100% --header 'Enter: open   Tab: mark several   Esc: quit' \
+	--preview "sh $(q "$here/preview") {}" \
+	--preview-window 'right,55%,border-left,<100(down,50%,border-top)' \
+	--bind "enter:become(SHELL=$(q "${SHELL:-/bin/sh}") exec $ed {+})"

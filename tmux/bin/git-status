@@ -1,0 +1,67 @@
+#!/bin/sh
+# The git segment of the tmux bar: branch and what changed, for the current pane's directory.
+#
+#   git-status DIR ICONS C_ICON C_TEXT C_STAGED C_CHANGED C_UNTRACKED
+#
+# Prints tmux style text such as "#[fg=..] main #[fg=..]+1 !2 ?3" (the symbols of
+# rihla's starship prompt: + staged, ! changed, ? untracked), or nothing at all when
+# DIR is not in a git work tree. That check walks up the directories in the shell, so
+# outside a repository git is never started. tmux runs this as a #() job: at most once per
+# status-interval for each directory, in the background, showing the last output meanwhile.
+# The colours come in as arguments (expanded by tmux from tmux/palette.conf).
+dir=${1:-}
+icons=${2:-ascii}
+c_icon=${3:-default}
+c_text=${4:-default}
+c_add=${5:-default}
+c_mod=${6:-default}
+c_new=${7:-default}
+
+d=$dir
+while :; do
+	[ -e "$d/.git" ] && break
+	case $d in
+	/ | '' | .) exit 0 ;;
+	*/*) d=${d%/*} && [ -n "$d" ] || d=/ ;;
+	*) exit 0 ;;
+	esac
+done
+command -v git >/dev/null 2>&1 || exit 0
+cd "$dir" 2>/dev/null || exit 0
+
+# GIT_OPTIONAL_LOCKS=0: never take the index lock (git 2.15+; older git ignores it), so
+# this cannot get in the way of a git command typed in the pane. No -C: git 1.8.3 lacks it.
+GIT_OPTIONAL_LOCKS=0 git status --porcelain -b --ignore-submodules=dirty 2>/dev/null | awk \
+	-v icons="$icons" -v ci="$c_icon" -v ct="$c_text" -v ca="$c_add" -v cm="$c_mod" -v cn="$c_new" '
+NR == 1 {
+	b = substr($0, 4)
+	ahead = 0; behind = 0
+	if (match(b, /ahead [0-9]+/)) ahead = substr(b, RSTART + 6, RLENGTH - 6) + 0
+	if (match(b, /behind [0-9]+/)) behind = substr(b, RSTART + 7, RLENGTH - 7) + 0
+	sub(/ \[.*\]$/, "", b)
+	sub(/\.\.\..*$/, "", b)
+	if (b ~ /^No commits yet on /) sub(/^No commits yet on /, "", b)
+	if (b ~ /^Initial commit on /) sub(/^Initial commit on /, "", b)
+	if (b ~ /^HEAD \(no branch\)/) b = "detached"
+	next
+}
+/^\?\?/ { new++; next }
+{
+	x = substr($0, 1, 1); y = substr($0, 2, 1)
+	if (x != " ") add++
+	if (y != " ") mod++
+}
+END {
+	if (NR == 0) exit
+	gsub(/#/, "##", b)
+	if (length(b) > 24) b = substr(b, 1, 23) (icons == "nerd" ? "\342\200\246" : "~")
+	if (icons == "nerd") { br = "\356\234\245 "; up = "\342\207\241"; dn = "\342\207\243" }
+	else { br = ""; up = "^"; dn = "v" }
+	s = "#[fg=" ci "]" br "#[fg=" ct "]" b
+	if (add) s = s " #[fg=" ca "]+" add
+	if (mod) s = s " #[fg=" cm "]!" mod
+	if (new) s = s " #[fg=" cn "]?" new
+	if (ahead) s = s " #[fg=" ct "]" up ahead
+	if (behind) s = s " #[fg=" ct "]" dn behind
+	print s
+}'

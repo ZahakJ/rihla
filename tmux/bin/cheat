@@ -1,0 +1,166 @@
+#!/bin/sh
+# Shows the tmux cheat sheet (prefix + H, or the "Cheat sheet" entry in the prefix + h menu).
+# The Markdown is drawn for the terminal: headings in blue, keys in mauve, tables as
+# aligned columns, in the colours of tmux/palette.conf. RIHLA_CHEAT_PLAIN=1 shows it as is.
+here=$(cd "$(dirname "$0")" && pwd)
+f=${RIHLA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/rihla}/docs/cheatsheet-tmux.md
+if [ ! -f "$f" ]; then
+	echo "cheat sheet not found: $f"
+	echo "press Enter to close"
+	read -r _
+	exit 0
+fi
+
+# The width to fill: the terminal's (the popup's, inside tmux), else $COLUMNS, else 80
+# ($RIHLA_CHEAT_COLS sets it, for tests).
+cols=${RIHLA_CHEAT_COLS:-}
+case $cols in '' | *[!0-9]*) cols=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f2) ;; esac
+case $cols in '' | *[!0-9]*) cols=$(tput cols 2>/dev/null) ;; esac
+case $cols in '' | *[!0-9]* | 0) cols=${COLUMNS:-80} ;; esac
+
+# Paragraphs and table cells are wrapped to the width at word boundaries (the Markdown's
+# own line breaks are for a 90-column editor, not for an 80-column terminal or popup).
+render() {
+	LC_ALL=C awk -v pal="$here/../palette.conf" -v cols="$cols" '
+function rgb(name,   h) {
+	h = col[name]
+	if (h == "") return ""
+	return sprintf("\033[38;2;%d;%d;%dm", hex(substr(h, 2, 2)), hex(substr(h, 4, 2)), hex(substr(h, 6, 2)))
+}
+function hex(s,   i, v, c) {
+	v = 0
+	for (i = 1; i <= 2; i++) { c = index("0123456789abcdef", tolower(substr(s, i, 1))) - 1; v = v * 16 + c }
+	return v
+}
+# Display width: UTF-8 continuation bytes take no column.
+function width(s,   t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
+function plain(s) { gsub(/`/, "", s); gsub(/\*\*/, "", s); return s }
+# Inline Markdown: `code` in the key colour, **bold** as bold. The state carries over from
+# one wrapped line to the next (a `code span` may be cut by the wrap).
+function inline(s, base,   out, i, c) {
+	out = base (bold ? B : "") (code ? KEY : "")
+	for (i = 1; i <= length(s); i++) {
+		c = substr(s, i, 1)
+		if (c == "`") { code = !code; out = out (code ? KEY : R base (bold ? B : "")); continue }
+		if (substr(s, i, 2) == "**") { bold = !bold; out = out (bold ? B (code ? KEY : "") : R base (code ? KEY : "")); i++; continue }
+		out = out c
+	}
+	return out R
+}
+# wrap(TEXT, WIDTH): the lines of TEXT, at most WIDTH columns each, into ln[1..n]; returns n.
+function wrap(text, w,   n, words, nw, i, cur, cw, ww) {
+	n = 0; cur = ""; cw = 0
+	nw = split(text, words, / +/)
+	for (i = 1; i <= nw; i++) {
+		if (words[i] == "") continue
+		ww = width(plain(words[i]))
+		if (cw > 0 && cw + 1 + ww > w) { ln[++n] = cur; cur = ""; cw = 0 }
+		cur = cw ? cur " " words[i] : words[i]
+		cw += (cw ? 1 : 0) + ww
+	}
+	if (cw > 0 || n == 0) ln[++n] = cur
+	return n
+}
+function spaces(n,   r) { r = ""; while (n-- > 0) r = r " "; return r }
+function para_flush(   n, i) {
+	if (para == "") return
+	code = 0; bold = 0
+	n = wrap(para, TW)
+	for (i = 1; i <= n; i++) print "  " inline(ln[i], TXT)
+	para = ""
+}
+function flush(   i, n, k, pad, avail) {
+	avail = TW - w1 - 2
+	for (i = 1; i <= nrow; i++) {
+		code = 0; bold = 0
+		if (avail < 24) {
+			# Too narrow for two columns: the key on its own line, the action under it.
+			printf "  %s\n", inline(c1[i], DIM)
+			code = 0; bold = 0
+			n = wrap(c2[i], TW - 4)
+			for (k = 1; k <= n; k++) printf "      %s\n", inline(ln[k], TXT)
+			continue
+		}
+		pad = spaces(w1 - width(plain(c1[i])))
+		n = wrap(c2[i], avail)
+		printf "  %s%s  %s\n", inline(c1[i], DIM), pad, inline(ln[1], TXT)
+		for (k = 2; k <= n; k++) printf "  %s  %s\n", spaces(w1), inline(ln[k], TXT)
+	}
+	nrow = 0; w1 = 0
+}
+BEGIN {
+	while ((getline line < pal) > 0)
+		if (match(line, /^set -g @rihla_[a-z0-9]+ "#[0-9a-fA-F]+"/)) {
+			split(line, a, /[@" ]+/); n = a[3]; sub(/^rihla_/, "", n); col[n] = a[4]
+		}
+	R = "\033[0m"; B = "\033[1m"
+	KEY = rgb("mauve"); TXT = rgb("text"); HEAD = B rgb("blue"); RULE = rgb("surface1"); DIM = rgb("overlay")
+	nrow = 0; w1 = 0; para = ""
+	# Text width: the terminal less the 2-column margin and one spare, at most 88.
+	TW = cols - 3
+	if (TW > 88) TW = 88
+	if (TW < 20) TW = 20
+	RW = TW < 76 ? TW : 76
+}
+/^# / {
+	t = substr($0, 3)
+	if (width(t) + 40 <= TW + 2) printf "  %s%s%s   %sq closes   j k scroll   / searches%s\n", B KEY, t, R, DIM, R
+	else printf "  %s%s%s   %sq closes%s\n", B KEY, t, R, DIM, R
+	next
+}
+/^## / {
+	para_flush()
+	if (nrow) flush()
+	t = substr($0, 4)
+	r = ""; for (i = width(t) + 2; i < RW; i++) r = r "\342\224\200"
+	printf "  %s%s%s %s%s%s\n", HEAD, t, R, RULE, r, R
+	next
+}
+/^\|/ {
+	para_flush()
+	line = $0
+	gsub(/\\\|/, "\001", line)
+	n = split(line, cell, /\|/)
+	k = cell[2]; v = cell[3]
+	gsub(/^ +| +$/, "", k); gsub(/^ +| +$/, "", v)
+	gsub(/\001/, "|", k); gsub(/\001/, "|", v)
+	if (k ~ /^-+$/) next
+	if (!inhead) { inhead = 1; next }
+	nrow++; c1[nrow] = k; c2[nrow] = v
+	if (width(plain(k)) > w1) w1 = width(plain(k))
+	next
+}
+{
+	if (nrow) flush()
+	inhead = 0
+	if ($0 == "") { para_flush(); print ""; next }
+	para = para == "" ? $0 : para " " $0
+}
+END { para_flush(); if (nrow) flush() }
+' "$f"
+}
+
+# Not on a terminal (a pipe, a test): print the drawn sheet and stop.
+if [ ! -t 1 ] && [ -z "${RIHLA_CHEAT_PLAIN:-}" ]; then
+	render
+	exit 0
+fi
+if command -v less >/dev/null 2>&1; then
+	if [ -z "${RIHLA_CHEAT_PLAIN:-}" ]; then
+		# The prompt line at the bottom says how to close it (less prints only ":" otherwise).
+		render | less -R -Ps'q closes   j k scroll   / searches'
+		exit 0
+	fi
+	exec less -R -Ps'tmux cheat sheet   q closes, arrows or j and k scroll' "$f"
+fi
+for n in nvim "$HOME/.local/bin/nvim"; do
+	if command -v "$n" >/dev/null 2>&1; then
+		# Make q close it, as it does in less (in Vim q starts a macro recording).
+		exec "$n" -R -c 'set nomodifiable' -c 'nnoremap <buffer> <nowait> q <Cmd>qa!<CR>' \
+			-c 'echo "q to close"' "$f"
+	fi
+done
+cat "$f"
+echo
+echo "press Enter to close"
+read -r _

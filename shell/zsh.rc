@@ -1,0 +1,518 @@
+# rihla's shell layer for zsh: the comforts of a fully set-up zsh on a bare machine.
+#
+# Sourced by one line in your .zshrc, inside rihla's marked block, which `rihla shell`
+# adds and `rihla shell --off` (or `rihla uninstall`) removes. Each piece is skipped when
+# your shell already has its own, so it never fights oh-my-zsh, powerlevel10k, starship
+# or plugins you load yourself:
+#
+#   prompt               starship with rihla's Catppuccin config (a plain zsh prompt in
+#                        the same colours when starship cannot run here)
+#   autosuggestions      grey completion from history; Right arrow or End accepts it
+#   syntax highlighting  commands green, unknown ones red, strings yellow
+#   completion           menu completion, extra completions (zsh-completions)
+#   search               rg and fd defaults (shell/ripgreprc, shell/fdignore), rgi (search
+#                        file contents, open the hit in nvim), ff (find a file, open it)
+#   fzf keys             Ctrl-R history, Ctrl-T files, Alt-C directories, **<Tab>, all
+#                        listing with fd and the same defaults
+#   zoxide               `z part-of-a-dir` jumps to a directory you have visited
+#   history              shared between terminals, large, no duplicates (only when you
+#                        have no history settings of your own)
+#   keys                 Home, End, Delete, Ctrl-Left/Right, Up/Down search what you typed
+#
+# Works on zsh 5.0.2 (CentOS 7) and newer. Prints nothing while the shell starts, so it is
+# safe with powerlevel10k's instant prompt. Kept fast (docs/shell.md has the numbers): what
+# fzf, zoxide and starship print to set themselves up is kept in a cache and read from
+# there instead of starting them again in every shell; compinit checks its directories once
+# a day; the prompt's git status is filled in after the prompt is drawn (zsh 5.0.8+). What
+# was switched on or skipped is kept in $rihla_shell_on and $rihla_shell_skipped; `rihla
+# shell status` shows both.
+# Turn single pieces off before this file is sourced, e.g. RIHLA_SHELL_NO="prompt zoxide".
+
+[[ -o interactive ]] || return 0
+(( ${+rihla_shell_loaded} )) && return 0
+typeset -g rihla_shell_loaded=1
+typeset -ga rihla_shell_on rihla_shell_skipped
+rihla_shell_on=() rihla_shell_skipped=()
+
+# The prompt when starship cannot run here: the directory in a blue pill (like the current
+# window in rihla's tmux bar), the git branch in mauve, then a green or red arrow.
+_rihla_prompt_setup() {
+	setopt prompt_subst
+	autoload -Uz vcs_info add-zsh-hook
+	zstyle ':vcs_info:*' enable git
+	zstyle ':vcs_info:*' check-for-changes true
+	zstyle ':vcs_info:*' stagedstr '+'
+	zstyle ':vcs_info:*' unstagedstr '!'
+	local e=$'\e' blue mauve peach green red crust over
+	if [[ $COLORTERM == (truecolor|24bit) ]]; then
+		blue="$e[38;2;137;180;250m" mauve="$e[38;2;203;166;247m" peach="$e[38;2;250;179;135m"
+		green="$e[38;2;166;227;161m" red="$e[38;2;243;139;168m" over="$e[38;2;108;112;134m"
+		crust="$e[38;2;17;17;27m$e[48;2;137;180;250m"
+	else
+		blue="$e[38;5;111m" mauve="$e[38;5;183m" peach="$e[38;5;216m" green="$e[38;5;151m"
+		red="$e[38;5;211m" over="$e[38;5;243m" crust="$e[38;5;233m$e[48;5;111m"
+	fi
+	local r="$e[0m" capl= capr= br='on '
+	if [[ $1 == nerd ]]; then
+		capl=$'' capr=$'' br=$' '
+	fi
+	zstyle ':vcs_info:git:*' formats "%{$mauve%}$br%b%{$peach%}%c%u%{$r%} "
+	zstyle ':vcs_info:git:*' actionformats "%{$mauve%}$br%b%{$peach%} (%a)%c%u%{$r%} "
+	add-zsh-hook precmd vcs_info
+	local host=
+	[[ -n ${SSH_CONNECTION:-} ]] && host="%{$over%}%m%{$r%} "
+	local arrow='>'
+	[[ $1 == nerd ]] && arrow=$'❯'
+	PROMPT="$host%{$blue%}$capl%{$crust%} %3~ %{$r$blue%}$capr%{$r%} \${vcs_info_msg_0_}%(?.%{$green%}.%{$red%})$arrow%{$r%} "
+	RPROMPT=
+}
+
+# Decisions are made with _rihla_* variables (unset at the end); plugins are sourced at the
+# top level, not inside a function, so their own typeset/local statements behave as they
+# expect.
+typeset -g _rihla_here=${${(%):-%x}:A:h}
+typeset -g _rihla_tools=${RIHLA_TOOLS:-${XDG_DATA_HOME:-$HOME/.local/share}/rihla-tools}/shell
+typeset -g _rihla_state=${XDG_STATE_HOME:-$HOME/.local/state}/rihla/shell
+typeset -g _rihla_cfg=${RIHLA_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/rihla}
+typeset -ga _rihla_no
+_rihla_no=(${=RIHLA_SHELL_NO:-})
+autoload -Uz is-at-least add-zsh-hook
+
+# Icons: the same rule as nvim and tmux ($RIHLA_ICONS, else ~/.config/rihla/icons).
+typeset -g _rihla_icons=${RIHLA_ICONS:-}
+if [[ -z $_rihla_icons && -r $_rihla_cfg/icons ]]; then
+	_rihla_icons=$(<$_rihla_cfg/icons)
+	_rihla_icons=${_rihla_icons%%[[:space:]]*}
+fi
+[[ $_rihla_icons == nerd ]] || _rihla_icons=ascii
+
+# Colours: Catppuccin Mocha, as in rihla's tmux bar and nvim. zsh before 5.7 cannot take
+# #rrggbb in highlight styles, so there the nearest 256-colour index is used.
+typeset -gA _rihla_c
+if is-at-least 5.7 && [[ $COLORTERM == (truecolor|24bit) ]]; then
+	_rihla_c=(text '#cdd6f4' over '#6c7086' mauve '#cba6f7' blue '#89b4fa' red '#f38ba8'
+		green '#a6e3a1' yellow '#f9e2af' peach '#fab387' teal '#94e2d5')
+else
+	_rihla_c=(text 189 over 243 mauve 183 blue 111 red 211 green 151 yellow 223 peach 216 teal 116)
+fi
+
+# rihla's starship and zoxide are run by their full path and never put on PATH: PATH is
+# passed on to tmux panes and nested shells, and a setup that picks its prompt by
+# `command -v starship` (HyDE: starship if found, else powerlevel10k) would switch there.
+# A starship or zoxide of yours on PATH is used instead of rihla's.
+_rihla_bin() { # _rihla_bin NAME: REPLY = the full path to run, yours first (no subshell)
+	if (( ${+commands[$1]} )); then
+		REPLY=${commands[$1]}
+	elif [[ -x $_rihla_tools/bin/$1 ]]; then
+		REPLY=$_rihla_tools/bin/$1
+	else
+		return 1
+	fi
+}
+# What fzf, zoxide and starship print to set themselves up only changes with the program,
+# so it is kept in a file: starting each of them in every new shell costs more than the
+# rest of this file. A cache is used while it is newer than the program and this file and
+# names the same program and zsh version in its first line.
+_rihla_fresh() { # _rihla_fresh FILE PROGRAM
+	local line
+	[[ -s $1 && $1 -nt $2 && $1 -nt $_rihla_here/zsh.rc ]] || return 1
+	{ read -r line <$1 } 2>/dev/null
+	[[ $line == "# rihla cache: $2 $ZSH_VERSION" ]]
+}
+_rihla_save() { # _rihla_save FILE PROGRAM TEXT: false when it cannot be written
+	[[ -n $3 ]] || return 1
+	[[ -d ${1:h} ]] || mkdir -p ${1:h} 2>/dev/null
+	print -r -- "# rihla cache: $2 $ZSH_VERSION"$'\n'"$3" >|$1.$$ 2>/dev/null && command mv -f $1.$$ $1 2>/dev/null
+}
+# Entries other rc files prepend again in every shell (some frameworks' .zshenv does, and
+# every pane and nested zsh reads it with the PATH it inherited) are kept once, first wins.
+typeset -gU path
+
+# ------------------------------------------------------------ history
+if (( ${_rihla_no[(I)history]} )); then
+	rihla_shell_skipped+=('history:RIHLA_SHELL_NO')
+elif [[ -n $HISTFILE ]]; then
+	rihla_shell_skipped+=('history:yours')
+else
+	HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history
+	HISTSIZE=50000
+	SAVEHIST=50000
+	# hist_fcntl_lock: lock the file with fcntl rather than a lock file, much cheaper on a
+	# home directory on NFS, as many work machines have.
+	setopt share_history hist_ignore_all_dups hist_ignore_space hist_reduce_blanks \
+		extended_history hist_verify hist_fcntl_lock
+	rihla_shell_on+=(history)
+fi
+setopt interactive_comments
+# Ctrl-S would freeze the terminal until Ctrl-Q. rihla's block runs stty -ixon too; this
+# also covers the line editor when that stty could not reach the terminal.
+unsetopt flow_control
+
+# ------------------------------------------------------------ keys
+# Only keys that do nothing yet are bound, in the emacs and vi-insert keymaps. Inside tmux
+# Home and End arrive as ESC[1~ and ESC[4~; in kitty as ESC[H and ESC[F (or ESCOH, ESCOF).
+if (( ! ${_rihla_no[(I)keys]} )); then
+	typeset -gA _rihla_k _rihla_bound
+	typeset -ga _rihla_pairs
+	_rihla_k=('^[[H' beginning-of-line '^[OH' beginning-of-line '^[[1~' beginning-of-line
+		'^[[7~' beginning-of-line '^[[F' end-of-line '^[OF' end-of-line '^[[4~' end-of-line
+		'^[[8~' end-of-line '^[[3~' delete-char '^[[1;5C' forward-word '^[[1;5D' backward-word
+		'^[[5C' forward-word '^[[5D' backward-word '^[[1;3C' forward-word '^[[1;3D' backward-word
+		'^[^[[C' forward-word '^[^[[D' backward-word '^[[Z' reverse-menu-complete
+		'^[[3;5~' kill-word)
+	autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+	zle -N up-line-or-beginning-search
+	zle -N down-line-or-beginning-search
+	typeset -gi _rihla_n=0
+	# Both keymaps' bindings in one subshell: bindkey lists '"^[[H" beginning-of-line'.
+	typeset -ga _rihla_dump
+	_rihla_dump=(${(f)"$(bindkey -M emacs; print -r -- '@@rihla viins'; bindkey -M viins)"})
+	for _rihla_km in emacs viins; do
+		# Pairs first, then one assignment (key strings such as ^] cannot be written as a
+		# subscript).
+		_rihla_pairs=()
+		for _rihla_l in "${_rihla_dump[@]}"; do
+			if [[ $_rihla_l == '@@rihla viins' ]]; then
+				[[ $_rihla_km == viins ]] && _rihla_pairs=() && continue
+				break
+			fi
+			[[ $_rihla_l == '"'*'" '* ]] && _rihla_pairs+=("${${_rihla_l%\" *}#\"}" "${_rihla_l##* }")
+		done
+		_rihla_bound=("${_rihla_pairs[@]}")
+		for _rihla_s in ${(k)_rihla_k}; do
+			if [[ -z ${_rihla_bound[$_rihla_s]:-} || ${_rihla_bound[$_rihla_s]} == undefined-key ]]; then
+				bindkey -M $_rihla_km $_rihla_s $_rihla_k[$_rihla_s]
+				(( _rihla_n++ ))
+			fi
+		done
+		# Up/Down: the previous command that starts with what you typed (as oh-my-zsh does);
+		# with nothing typed, plain history. Only while they are zsh's defaults.
+		for _rihla_s in '^[[A' '^[OA'; do
+			if [[ ${_rihla_bound[$_rihla_s]:-} == up-line-or-history ]]; then
+				bindkey -M $_rihla_km $_rihla_s up-line-or-beginning-search
+				(( _rihla_n++ ))
+			fi
+		done
+		for _rihla_s in '^[[B' '^[OB'; do
+			if [[ ${_rihla_bound[$_rihla_s]:-} == down-line-or-history ]]; then
+				bindkey -M $_rihla_km $_rihla_s down-line-or-beginning-search
+				(( _rihla_n++ ))
+			fi
+		done
+	done
+	if (( _rihla_n )); then rihla_shell_on+=(keys); else rihla_shell_skipped+=('keys:yours'); fi
+	unset _rihla_k _rihla_bound _rihla_pairs _rihla_n _rihla_km _rihla_l _rihla_s _rihla_dump
+fi
+
+# ------------------------------------------------------------ completion
+if (( ${_rihla_no[(I)completion]} )); then
+	rihla_shell_skipped+=('completion:RIHLA_SHELL_NO')
+elif (( ${+functions[compdef]} )); then
+	# compinit already ran (oh-my-zsh, a framework, or your own): leave it alone.
+	rihla_shell_skipped+=('completion:yours')
+else
+	[[ -d $_rihla_tools/zsh-completions/src ]] && fpath=($_rihla_tools/zsh-completions/src $fpath)
+	zmodload -i zsh/complist 2>/dev/null
+	autoload -Uz compinit
+	[[ -d $_rihla_state ]] || mkdir -p $_rihla_state 2>/dev/null
+	# The full check (new completion files, directories other users can write to) once a
+	# day; in between the saved list is read as it is (-C), which is most of compinit's
+	# time. -i: skip directories other users can write to instead of asking about them.
+	() {
+		setopt localoptions extendedglob
+		local d=$_rihla_state/zcompdump-$ZSH_VERSION
+		if [[ -n $d(#qN.mh-24) ]]; then
+			compinit -C -d $d
+		else
+			compinit -i -d $d 2>/dev/null
+			# compinit rewrites the file only when something changed: mark today's check.
+			[[ -f $d ]] && command touch $d 2>/dev/null
+		fi
+		# A compiled copy loads faster; made in the background, used from the next shell.
+		[[ -s $d && ! $d.zwc -nt $d ]] && { zcompile $d 2>/dev/null } &!
+	}
+	zstyle ':completion:*' menu select
+	zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*'
+	zstyle ':completion:*' list-colors ${(s.:.)LS_COLORS}
+	zstyle ':completion:*' group-name ''
+	zstyle ':completion:*:descriptions' format "%F{$_rihla_c[mauve]}-- %d --%f"
+	zstyle ':completion:*:warnings' format "%F{$_rihla_c[red]}-- no matches --%f"
+	rihla_shell_on+=(completion)
+fi
+
+# ------------------------------------------------------------ search: rg, fd, rgi, ff
+# The same defaults as the editor (docs/shell.md, Defaults): hidden files on, symlinks
+# followed, .git, node_modules and the like left out.
+typeset -g _rihla_fd= _rihla_fdo=
+if (( ${+commands[fd]} )); then
+	_rihla_fd=fd
+elif (( ${+commands[fdfind]} )); then
+	_rihla_fd=fdfind # Debian and Ubuntu name it so
+fi
+[[ -n $_rihla_fd ]] && _rihla_fdo="--hidden --follow --ignore-file ${(q)_rihla_here}/fdignore"
+if (( ${_rihla_no[(I)search]} )); then
+	rihla_shell_skipped+=('search:RIHLA_SHELL_NO')
+else
+	[[ -z ${RIPGREP_CONFIG_PATH:-} && -r $_rihla_here/ripgreprc ]] && export RIPGREP_CONFIG_PATH=$_rihla_here/ripgreprc
+	if [[ -n $_rihla_fd ]] && (( ! ${+aliases[$_rihla_fd]} && ! ${+functions[$_rihla_fd]} )); then
+		alias $_rihla_fd="$_rihla_fd $_rihla_fdo"
+	fi
+	# rgi, ff (and fdi, the same as ff): small scripts next to this file, so they work the
+	# same from bash and fish. A command, alias or function of yours by that name wins.
+	for _rihla_s in rgi ff fdi; do
+		(( ${+commands[$_rihla_s]} || ${+aliases[$_rihla_s]} || ${+functions[$_rihla_s]} )) && continue
+		eval "$_rihla_s() { sh ${(q)_rihla_here}/bin/${${_rihla_s/fdi/ff}} \"\$@\"; }"
+	done
+	unset _rihla_s
+	rihla_shell_on+=(search)
+fi
+
+# ------------------------------------------------------------ fzf
+if (( ${_rihla_no[(I)fzf]} )); then
+	rihla_shell_skipped+=('fzf:RIHLA_SHELL_NO')
+elif (( ${+widgets[fzf-history-widget]} )); then
+	rihla_shell_skipped+=('fzf:yours')
+elif (( ${+commands[fzf]} )) && {
+	_rihla_f=$_rihla_state/init/fzf.zsh _rihla_x=${commands[fzf]:A}
+	_rihla_fresh $_rihla_f $_rihla_x || {
+		# fzf 0.48+ prints its zsh setup with --zsh; an older one fails here.
+		_rihla_init=$(fzf --zsh 2>/dev/null) && [[ $_rihla_init == *fzf-history-widget* ]] &&
+			{ _rihla_save $_rihla_f $_rihla_x "$_rihla_init" || _rihla_f= }
+	}
+}; then
+	if [[ -z ${FZF_DEFAULT_OPTS:-}${FZF_DEFAULT_OPTS_FILE:-} ]]; then
+		export FZF_DEFAULT_OPTS="--height=50% --min-height=12 --layout=reverse --border=rounded --info=inline \
+--color=bg+:#313244,spinner:#f5e0dc,hl:#f38ba8,fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#cba6f7,\
+marker:#a6e3a1,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8,border:#6c7086"
+	fi
+	if [[ -n $_rihla_fd ]]; then
+		: ${FZF_DEFAULT_COMMAND:="$_rihla_fd --type f $_rihla_fdo"}
+		: ${FZF_CTRL_T_COMMAND:="$_rihla_fd $_rihla_fdo"}
+		: ${FZF_ALT_C_COMMAND:="$_rihla_fd --type d $_rihla_fdo"}
+		export FZF_DEFAULT_COMMAND FZF_CTRL_T_COMMAND FZF_ALT_C_COMMAND
+		# **<Tab> lists with fd too (fzf calls these with the directory to list).
+		(( ${+functions[_fzf_compgen_path]} )) ||
+			eval "_fzf_compgen_path() { $_rihla_fd $_rihla_fdo . \"\$1\" 2>/dev/null; }"
+		(( ${+functions[_fzf_compgen_dir]} )) ||
+			eval "_fzf_compgen_dir() { $_rihla_fd --type d $_rihla_fdo . \"\$1\" 2>/dev/null; }"
+	fi
+	# A preview of the file (bat when you have it) or the directory under the cursor.
+	: ${FZF_CTRL_T_OPTS:="--height=80% --preview 'sh ${(q)_rihla_here}/bin/preview {}' --preview-window 'right,55%,border-left,<100(down,50%,border-top)'"}
+	: ${FZF_ALT_C_OPTS:="--height=80% --preview 'sh ${(q)_rihla_here}/bin/preview {}' --preview-window 'right,55%,border-left,<100(down,50%,border-top)'"}
+	export FZF_CTRL_T_OPTS FZF_ALT_C_OPTS
+	# Its keys need the line editor. Without a terminal (zsh -i -c ... from a script, an
+	# IDE or ssh) the zle option is set but cannot be changed, and fzf's setup, which
+	# saves and restores options, would print "can't change option: zle" twice.
+	if [[ ! -o zle ]] || ! { setopt zle } 2>/dev/null; then
+		:
+	elif [[ -n $_rihla_f ]]; then source $_rihla_f; else eval "$_rihla_init"; fi
+	rihla_shell_on+=(fzf)
+else
+	rihla_shell_skipped+=('fzf:no fzf 0.48+ on PATH')
+fi
+
+# ------------------------------------------------------------ zoxide
+if (( ${_rihla_no[(I)zoxide]} )); then
+	rihla_shell_skipped+=('zoxide:RIHLA_SHELL_NO')
+elif (( ${+functions[__zoxide_z]} || ${+functions[z]} || ${+aliases[z]} )); then
+	rihla_shell_skipped+=('zoxide:yours (z is already defined)')
+elif _rihla_bin zoxide && _rihla_x=$REPLY && {
+	_rihla_f=$_rihla_state/init/zoxide.zsh
+	_rihla_fresh $_rihla_f ${_rihla_x:A} || {
+		# zoxide's functions call `\command zoxide`; rihla's copy is not on PATH, so they
+		# get the full path instead (of yours too: one lookup less).
+		_rihla_init=$($_rihla_x init zsh 2>/dev/null) && [[ -n $_rihla_init ]] && {
+			_rihla_init=${_rihla_init//'\command zoxide'/${(q)_rihla_x}}
+			_rihla_save $_rihla_f ${_rihla_x:A} "$_rihla_init" || _rihla_f=
+		}
+	}
+}; then
+	[[ -n ${_ZO_DATA_DIR:-} ]] || export _ZO_DATA_DIR=$_rihla_state/zoxide
+	[[ -d $_ZO_DATA_DIR ]] || mkdir -p $_ZO_DATA_DIR 2>/dev/null
+	if [[ -n $_rihla_f ]]; then source $_rihla_f; else eval "$_rihla_init"; fi
+	rihla_shell_on+=(zoxide)
+else
+	rihla_shell_skipped+=('zoxide:not installed')
+fi
+
+# ------------------------------------------------------------ prompt
+# A prompt of your own wins: powerlevel10k, starship, an oh-my-zsh or promptinit theme, or
+# any PROMPT that is not a distribution's default. Starship is recognised by the functions
+# its init defines in this shell, not by $STARSHIP_SHELL: that one is exported, so a tmux
+# pane or a nested zsh inherits it from the shell that started it without having a prompt.
+typeset -g _rihla_mine=
+if (( ${+functions[p10k]} || ${+functions[prompt_powerlevel10k_setup]} || ${+POWERLEVEL9K_MODE} )); then
+	_rihla_mine=powerlevel10k
+elif (( ${+functions[prompt_starship_precmd]} || ${+functions[starship_precmd]} )); then
+	_rihla_mine=starship
+elif [[ -n ${ZSH_THEME:-} ]]; then
+	_rihla_mine="oh-my-zsh theme $ZSH_THEME"
+elif [[ -n ${prompt_theme[1]:-} && ${prompt_theme[1]} != off ]]; then
+	_rihla_mine="prompt theme ${prompt_theme[1]}"
+elif [[ $PROMPT != ('%m%# '|'[%n@%m]%~%# '|'[%n@%m %1~]%(#.#.$) '|'%n@%m %1~ %# '|'%m:%~%# '|'%n@%m:%~%# '|'') ]]; then
+	_rihla_mine='your own PROMPT'
+fi
+# Exported by an outer shell's async git status (below); this shell finds its own.
+unset RIHLA_GIT_STATUS
+typeset -g _rihla_ss=
+if (( ${_rihla_no[(I)prompt]} )); then
+	rihla_shell_skipped+=('prompt:RIHLA_SHELL_NO')
+elif [[ -n $_rihla_mine ]]; then
+	rihla_shell_skipped+=("prompt:$_rihla_mine")
+elif _rihla_bin starship && _rihla_x=$REPLY && { [[ -n ${STARSHIP_CACHE:-} ]] || export STARSHIP_CACHE=$_rihla_state/starship } && {
+	_rihla_f=$_rihla_state/init/starship.zsh
+	_rihla_fresh $_rihla_f ${_rihla_x:A} || {
+		# The whole setup, not the two lines `starship init zsh` prints (which start
+		# starship again to get it). Its full path is in it.
+		_rihla_init=$($_rihla_x init zsh --print-full-init 2>/dev/null) && [[ $_rihla_init == *starship_precmd* ]] && {
+			# zsh before 5.3 has no [[ -v ]]: starship's setup stops there with "unknown
+			# condition: -v" and leaves zsh's default prompt (CentOS 7's zsh 5.0.2).
+			_rihla_init=${_rihla_init//'[[ -v widgets[zle-keymap-select] ]]'/'(( ${+widgets[zle-keymap-select]} ))'}
+			_rihla_save $_rihla_f ${_rihla_x:A} "$_rihla_init" || _rihla_f=
+		}
+	}
+}; then
+	# rihla's own config, also when inherited from the shell that started this one (a tmux
+	# pane, a nested zsh), is chosen again here.
+	if [[ -z ${STARSHIP_CONFIG:-} || $STARSHIP_CONFIG == ($_rihla_here/starship-*.toml|$_rihla_state/init/starship-*-async.toml) ]]; then
+		if [[ -f ${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml ]]; then
+			export STARSHIP_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/starship.toml
+		else
+			export STARSHIP_CONFIG=$_rihla_here/starship-$_rihla_icons.toml
+			_rihla_ss=$STARSHIP_CONFIG
+		fi
+	fi
+	if [[ -n $_rihla_f ]]; then source $_rihla_f; else eval "$_rihla_init"; fi
+	rihla_shell_on+=(prompt:starship)
+	# The git status (changed, staged, untracked files) of a large repository can take
+	# long to find, and starship cannot draw the prompt before it has it. With rihla's own
+	# starship config and zsh 5.0.8+, the prompt is drawn without it and the status is
+	# filled in when a background starship has it: typing never waits for git.
+	if [[ -n $_rihla_ss ]] && is-at-least 5.0.8; then
+		_rihla_f=$_rihla_state/init/starship-$_rihla_icons-async.toml
+		if [[ ! $_rihla_f -nt $_rihla_ss || ! $_rihla_f -nt $_rihla_here/zsh.rc ]]; then
+			_rihla_init=$(<$_rihla_ss)
+			_rihla_init=${_rihla_init/'$git_status'/'${env_var.RIHLA_GIT_STATUS}'}
+			[[ -d ${_rihla_f:h} ]] || mkdir -p ${_rihla_f:h} 2>/dev/null
+			print -r -- "$_rihla_init
+
+[env_var.RIHLA_GIT_STATUS]
+format = \"[\$env_value](\$style) \"
+style = \"fg:peach\"" >|$_rihla_f 2>/dev/null
+		fi
+		if [[ -s $_rihla_f ]]; then
+			export STARSHIP_CONFIG=$_rihla_f
+			typeset -g _rihla_git_fd= _rihla_git_pwd= _rihla_git_bin=$_rihla_x _rihla_git_cfg=$_rihla_ss
+			_rihla_git_start() {
+				emulate -L zsh
+				if [[ -n $_rihla_git_fd ]]; then
+					zle -F $_rihla_git_fd 2>/dev/null
+					exec {_rihla_git_fd}<&-
+					_rihla_git_fd=
+				fi
+				# Another directory: no status from the last one while this one's is found.
+				[[ $PWD == $_rihla_git_pwd ]] || unset RIHLA_GIT_STATUS
+				_rihla_git_pwd=$PWD
+				exec {_rihla_git_fd}< <(STARSHIP_SHELL= STARSHIP_CONFIG=$_rihla_git_cfg $_rihla_git_bin module git_status 2>/dev/null)
+				# As zsh-autosuggestions does: before 5.8 Ctrl-C needs a fork here to work.
+				is-at-least 5.8 || command true
+				zle -F $_rihla_git_fd _rihla_git_done
+			}
+			_rihla_git_done() {
+				emulate -L zsh
+				setopt extendedglob
+				local out=
+				[[ -z ${2-} || $2 == hup ]] && IFS= read -r -d '' -u $1 out
+				zle -F $1
+				exec {1}<&-
+				_rihla_git_fd=
+				out=${out//$'\e'\[[0-9;]#m/}
+				out=${${out##[[:space:]]#}%%[[:space:]]#}
+				if [[ $out != ${RIHLA_GIT_STATUS-} ]]; then
+					if [[ -n $out ]]; then export RIHLA_GIT_STATUS=$out; else unset RIHLA_GIT_STATUS; fi
+					zle reset-prompt
+				fi
+			}
+			add-zsh-hook precmd _rihla_git_start
+		fi
+	fi
+else
+	_rihla_prompt_setup $_rihla_icons
+	rihla_shell_on+=(prompt:zsh)
+fi
+
+# ------------------------------------------------------------ autosuggestions
+if (( ${_rihla_no[(I)autosuggestions]} )); then
+	rihla_shell_skipped+=('autosuggestions:RIHLA_SHELL_NO')
+elif (( ${+functions[_zsh_autosuggest_start]} )); then
+	rihla_shell_skipped+=('autosuggestions:yours')
+elif [[ -r $_rihla_tools/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+	ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=$_rihla_c[over]"
+	# The completion strategy asks zsh's completion in a hidden terminal (zpty) when no
+	# history line matches: over 100 ms for `git ` (docs/shell.md, Speed), and zpty is
+	# unreliable before zsh 5.4. From history only: what you typed before is the useful
+	# suggestion, and it is found in a few milliseconds.
+	ZSH_AUTOSUGGEST_STRATEGY=(history)
+	# Widgets are wrapped once, not again before every prompt (rihla's line is the last
+	# thing in your rc file, so nothing comes after it to wrap).
+	ZSH_AUTOSUGGEST_MANUAL_REBIND=1
+	# No suggestion for a line longer than this (a paste): nothing to search for.
+	ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=200
+	source $_rihla_tools/zsh-autosuggestions/zsh-autosuggestions.zsh
+	rihla_shell_on+=(autosuggestions)
+else
+	rihla_shell_skipped+=('autosuggestions:not installed')
+fi
+
+# ------------------------------------------------------------ syntax highlighting
+# Last, as zsh-syntax-highlighting asks: it wraps the widgets defined before it.
+if (( ${_rihla_no[(I)highlighting]} )); then
+	rihla_shell_skipped+=('highlighting:RIHLA_SHELL_NO')
+elif (( ${+functions[_zsh_highlight]} || ${+FAST_HIGHLIGHT} )); then
+	rihla_shell_skipped+=('highlighting:yours')
+elif [[ -r $_rihla_tools/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+	# A line longer than this (a paste) is not coloured: highlighting costs time per key
+	# in proportion to the line.
+	ZSH_HIGHLIGHT_MAXLENGTH=300
+	source $_rihla_tools/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+	typeset -gA ZSH_HIGHLIGHT_STYLES
+	ZSH_HIGHLIGHT_STYLES[command]="fg=$_rihla_c[green]"
+	ZSH_HIGHLIGHT_STYLES[builtin]="fg=$_rihla_c[green]"
+	ZSH_HIGHLIGHT_STYLES[alias]="fg=$_rihla_c[green]"
+	ZSH_HIGHLIGHT_STYLES[function]="fg=$_rihla_c[green]"
+	ZSH_HIGHLIGHT_STYLES[arg0]="fg=$_rihla_c[green]"
+	ZSH_HIGHLIGHT_STYLES[precommand]="fg=$_rihla_c[green],underline"
+	ZSH_HIGHLIGHT_STYLES[reserved-word]="fg=$_rihla_c[mauve]"
+	ZSH_HIGHLIGHT_STYLES[unknown-token]="fg=$_rihla_c[red]"
+	ZSH_HIGHLIGHT_STYLES[commandseparator]="fg=$_rihla_c[teal]"
+	ZSH_HIGHLIGHT_STYLES[redirection]="fg=$_rihla_c[teal]"
+	ZSH_HIGHLIGHT_STYLES[path]="fg=$_rihla_c[text],underline"
+	ZSH_HIGHLIGHT_STYLES[globbing]="fg=$_rihla_c[peach]"
+	ZSH_HIGHLIGHT_STYLES[single-quoted-argument]="fg=$_rihla_c[yellow]"
+	ZSH_HIGHLIGHT_STYLES[double-quoted-argument]="fg=$_rihla_c[yellow]"
+	ZSH_HIGHLIGHT_STYLES[dollar-quoted-argument]="fg=$_rihla_c[yellow]"
+	ZSH_HIGHLIGHT_STYLES[single-hyphen-option]="fg=$_rihla_c[blue]"
+	ZSH_HIGHLIGHT_STYLES[double-hyphen-option]="fg=$_rihla_c[blue]"
+	ZSH_HIGHLIGHT_STYLES[comment]="fg=$_rihla_c[over]"
+	rihla_shell_on+=(highlighting)
+else
+	rihla_shell_skipped+=('highlighting:not installed')
+fi
+
+# The plugins' files compiled (zcompile) next to them, in rihla's tools directory: zsh
+# reads a compiled copy faster. In the background, used from the next shell on.
+() {
+	local f
+	local -a todo
+	for f in $_rihla_tools/zsh-autosuggestions/zsh-autosuggestions.zsh \
+		$_rihla_tools/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh \
+		$_rihla_tools/zsh-syntax-highlighting/highlighters/main/main-highlighter.zsh \
+		$_rihla_state/init/*.zsh(N); do
+		[[ -r $f && ! $f.zwc -nt $f && -w ${f:h} ]] && todo+=($f)
+	done
+	(( $#todo )) && { for f in $todo; do zcompile $f 2>/dev/null; done } &!
+}
+
+unset _rihla_here _rihla_tools _rihla_state _rihla_cfg _rihla_no _rihla_icons _rihla_c _rihla_mine \
+	_rihla_x _rihla_init _rihla_f _rihla_ss _rihla_fd _rihla_fdo
+unfunction _rihla_bin _rihla_fresh _rihla_save

@@ -1,0 +1,22 @@
+# rihla's ripgrep defaults, shared by the shell (rihla shell exports RIPGREP_CONFIG_PATH
+# to this file when you have not set one) and the editor (its grep and live grep).
+# One flag per line, as ripgrep reads it. The names below are the same as in fdignore.
+# Search hidden files too, follow symlinks, ignore case unless the pattern has a capital,
+# and never show a minified line in full. `rg --no-config` searches without these.
+--smart-case
+--hidden
+--follow
+--max-columns=300
+--max-columns-preview
+--glob=!.git/
+--glob=!.hg/
+--glob=!.svn/
+--glob=!node_modules/
+--glob=!.venv/
+--glob=!__pycache__/
+--glob=!.mypy_cache/
+--glob=!.pytest_cache/
+--glob=!.ruff_cache/
+--glob=!.tox/
+--glob=!.direnv/
+--glob=!.DS_Store

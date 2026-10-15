@@ -1,0 +1,15 @@
+# rihla's fd ignore list (gitignore syntax), shared by the shell and the editor:
+#   fd --hidden --follow --ignore-file <rihla>/shell/fdignore
+# The same names as the --glob lines in ripgreprc. fd also honours .gitignore.
+.git/
+.hg/
+.svn/
+node_modules/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.direnv/
+.DS_Store

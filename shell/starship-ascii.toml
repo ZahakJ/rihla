@@ -1,0 +1,85 @@
+# rihla's starship prompt, plain characters only (RIHLA_ICONS=ascii, the default): renders
+# in every font. Catppuccin Mocha, matching rihla's tmux bar: the directory in a blue block
+# like the current window, the git branch in mauve. Used only when you have no
+# starship.toml of your own; copy it to ~/.config/starship.toml to change it.
+"$schema" = "https://starship.rs/config-schema.json"
+add_newline = false
+command_timeout = 400
+palette = "rihla"
+format = """$username$hostname$directory $git_branch$git_state$git_status$python$jobs$cmd_duration$character"""
+
+[palettes.rihla]
+text = "#cdd6f4"
+subtext = "#a6adc8"
+overlay = "#6c7086"
+crust = "#11111b"
+mauve = "#cba6f7"
+blue = "#89b4fa"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+peach = "#fab387"
+teal = "#94e2d5"
+
+[username]
+format = "[$user]($style)[@](fg:overlay)"
+style_user = "fg:subtext"
+style_root = "bold fg:red"
+
+[hostname]
+ssh_only = true
+format = "[$hostname]($style) "
+style = "fg:mauve"
+
+[directory]
+format = "[ $path[$read_only]($read_only_style) ]($style)"
+style = "fg:crust bg:blue bold"
+read_only = " (ro)"
+read_only_style = "fg:red bg:blue"
+truncation_length = 3
+truncation_symbol = ".../"
+truncate_to_repo = true
+
+[git_branch]
+format = "[on $branch]($style) "
+symbol = ""
+style = "fg:mauve"
+
+[git_state]
+format = "[$state( $progress_current/$progress_total)]($style) "
+style = "fg:yellow"
+
+[git_status]
+format = "([$all_status$ahead_behind]($style) )"
+style = "fg:peach"
+ahead = "^${count}"
+behind = "v${count}"
+diverged = "^${ahead_count}v${behind_count}"
+conflicted = "=${count}"
+untracked = "?${count}"
+stashed = "$"
+modified = "!${count}"
+staged = "+${count}"
+renamed = ">${count}"
+deleted = "x${count}"
+
+[python]
+format = "[venv:$virtualenv]($style) "
+style = "fg:yellow"
+detect_extensions = []
+detect_files = []
+
+[jobs]
+format = "[jobs:$number]($style) "
+symbol = ""
+style = "fg:teal"
+
+[cmd_duration]
+format = "[took $duration]($style) "
+style = "fg:yellow"
+min_time = 3000
+
+[character]
+success_symbol = "[>](bold fg:green)"
+error_symbol = "[>](bold fg:red)"
+vimcmd_symbol = "[<](bold fg:mauve)"

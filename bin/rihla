@@ -1,0 +1,2325 @@
+#!/bin/sh
+# rihla: install, update and check a portable Neovim + tmux setup without root.
+#
+# Written for POSIX sh plus `local` (dash, bash 3.2+ as on macOS, busybox ash). No
+# bashisms, no GNU-only flags, so the same file runs on CentOS 7, current Linux and macOS.
+# shellcheck disable=SC3043  # `local` is supported by every sh this targets.
+
+set -u
+
+TAB=$(printf '\t')
+NL='
+'
+
+# ---------------------------------------------------------------------------
+# Locations
+# ---------------------------------------------------------------------------
+
+resolve_path() {
+	local p l
+	p=$1
+	while [ -h "$p" ]; do
+		l=$(readlink "$p")
+		case $l in
+		/*) p=$l ;;
+		*) p=$(dirname "$p")/$l ;;
+		esac
+	done
+	printf '%s\n' "$p"
+}
+
+SELF=$(resolve_path "$0")
+RIHLA_HOME=$(cd "$(dirname "$SELF")/.." && pwd -P)
+export RIHLA_HOME
+
+: "${HOME:?HOME is not set}"
+XDATA=${XDG_DATA_HOME:-$HOME/.local/share}
+XSTATE=${XDG_STATE_HOME:-$HOME/.local/state}
+XCACHE=${XDG_CACHE_HOME:-$HOME/.cache}
+XCONFIG=${XDG_CONFIG_HOME:-$HOME/.config}
+
+TOOLS=${RIHLA_TOOLS:-$XDATA/rihla-tools}
+BIN=${RIHLA_BIN:-$HOME/.local/bin}
+STATE=$XSTATE/rihla
+JOURNAL=$STATE/journal
+CACHE_ROOT=${RIHLA_CACHE:-$XCACHE/rihla}
+CACHE=$CACHE_ROOT/downloads
+USERCFG=$XCONFIG/rihla
+MANIFEST=$RIHLA_HOME/lib/manifest
+
+NVIM_CONFIG=$XCONFIG/nvim
+NVIM_DATA=$XDATA/nvim
+NVIM_STATE=$XSTATE/nvim
+NVIM_CACHE=$XCACHE/nvim
+LAZY_DIR=$NVIM_DATA/lazy/lazy.nvim
+
+REPO_URL=${RIHLA_REPO:-https://github.com/ZahakJ/rihla}
+REPO_REF=${RIHLA_REF:-main}
+
+OFFLINE_DIR=${RIHLA_OFFLINE_DIR:-}
+CHANGES=0
+WARNINGS=0
+
+# Proxies: curl, wget and git read the lowercase variables; some tools read uppercase.
+# Mirror whichever the user set so every download path sees the same proxy.
+[ -z "${https_proxy:-}" ] && [ -n "${HTTPS_PROXY:-}" ] && https_proxy=$HTTPS_PROXY && export https_proxy
+[ -z "${http_proxy:-}" ] && [ -n "${HTTP_PROXY:-}" ] && http_proxy=$HTTP_PROXY && export http_proxy
+[ -z "${no_proxy:-}" ] && [ -n "${NO_PROXY:-}" ] && no_proxy=$NO_PROXY && export no_proxy
+[ -z "${HTTPS_PROXY:-}" ] && [ -n "${https_proxy:-}" ] && HTTPS_PROXY=$https_proxy && export HTTPS_PROXY
+[ -z "${HTTP_PROXY:-}" ] && [ -n "${http_proxy:-}" ] && HTTP_PROXY=$http_proxy && export HTTP_PROXY
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+	C_B=$(printf '\033[1m') C_R=$(printf '\033[31m') C_G=$(printf '\033[32m')
+	C_Y=$(printf '\033[33m') C_M=$(printf '\033[35m') C_0=$(printf '\033[0m')
+else
+	C_B='' C_R='' C_G='' C_Y='' C_M='' C_0=''
+fi
+
+say() { printf '%s\n' "$*"; }
+step() { printf '%s==>%s %s%s%s\n' "$C_M" "$C_0" "$C_B" "$*" "$C_0"; }
+ok() { printf '  %sok%s    %s\n' "$C_G" "$C_0" "$*"; }
+changed() {
+	CHANGES=$((CHANGES + 1))
+	printf '  %sdone%s  %s\n' "$C_Y" "$C_0" "$*"
+}
+warn() {
+	WARNINGS=$((WARNINGS + 1))
+	printf '  %swarn%s  %s\n' "$C_Y" "$C_0" "$*" >&2
+}
+err() { printf '%serror:%s %s\n' "$C_R" "$C_0" "$*" >&2; }
+die() {
+	err "$*"
+	exit 1
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# Platform
+# ---------------------------------------------------------------------------
+
+detect_platform() {
+	case $(uname -s) in
+	Linux) OS=linux ;;
+	Darwin) OS=darwin ;;
+	*) OS=$(uname -s | tr '[:upper:]' '[:lower:]') ;;
+	esac
+	case $(uname -m) in
+	x86_64 | amd64) ARCH=x86_64 ;;
+	aarch64 | arm64) ARCH=arm64 ;;
+	*) ARCH=$(uname -m) ;;
+	esac
+	# A shell running under Rosetta reports x86_64 on Apple silicon; prefer native builds.
+	if [ "$OS" = darwin ] && [ "$ARCH" = x86_64 ] &&
+		[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+		ARCH=arm64
+	fi
+	LIBC=none GLIBC=
+	if [ "$OS" = linux ]; then
+		GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+		if [ -z "$GLIBC" ]; then
+			GLIBC=$(ldd --version 2>&1 | sed -n '1s/.*[^0-9.]\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
+			ldd --version 2>&1 | grep -qi musl && GLIBC=
+		fi
+		if [ -n "$GLIBC" ]; then LIBC=glibc; else LIBC=musl; fi
+	fi
+	# Targets for asset selection; `rihla bundle` overrides these.
+	T_OS=$OS T_ARCH=$ARCH T_GLIBC=$GLIBC
+}
+
+platform_label() {
+	if [ "$OS" = linux ]; then
+		if [ "$LIBC" = glibc ]; then printf 'linux %s (glibc %s)' "$ARCH" "$GLIBC"; else printf 'linux %s (%s)' "$ARCH" "$LIBC"; fi
+	else
+		printf '%s %s' "$OS" "$ARCH"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Versions
+# ---------------------------------------------------------------------------
+
+# First dotted version number in stdin ("git version 1.8.3.1" -> 1.8.3.1, "tmux 3.2a" -> 3.2a).
+ver_of() {
+	sed -n 's/^[^0-9]*\([0-9][0-9]*\(\.[0-9][0-9]*\)*[a-z]\{0,1\}\).*/\1/p' | head -n 1
+}
+
+# ver_ge A B: true when version A >= B. Letter suffixes (3.2a) are ignored.
+ver_ge() {
+	awk -v a="$1" -v b="$2" 'BEGIN {
+		na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+		for (i = 1; i <= n; i++) {
+			xi = x[i] + 0; yi = y[i] + 0
+			if (xi > yi) exit 0
+			if (xi < yi) exit 1
+		}
+		exit 0 }'
+}
+
+# Version of a tool binary, or empty.
+tool_version() {
+	local t="$1" bin="$2"
+	case $t in
+	tmux) "$bin" -V 2>/dev/null | sed 's/next-//' | ver_of ;;
+	# "commit=..., version=0.65.1, os=linux, arch=amd64, git version=2.43.0": take the
+	# field that is exactly "version=", not git's, which comes last on the same line.
+	lazygit) "$bin" --version 2>/dev/null | tr ',' '\n' | sed -n 's/^[[:space:]]*version=\([0-9][0-9.]*\).*/\1/p' | head -n 1 ;;
+	*) "$bin" --version 2>/dev/null | ver_of ;;
+	esac
+}
+
+# Path of a tool on PATH, ignoring rihla's own shims, so we can judge the system copy.
+sys_which() {
+	local t="$1" d old_ifs
+	old_ifs=$IFS
+	IFS=:
+	for d in $PATH; do
+		IFS=$old_ifs
+		[ -n "$d" ] || continue
+		case $d in "$BIN" | "$TOOLS/bin" | "$TOOLS"/*) continue ;; esac
+		if [ -x "$d/$t" ] && [ ! -d "$d/$t" ]; then
+			printf '%s\n' "$d/$t"
+			return 0
+		fi
+	done
+	IFS=$old_ifs
+	return 1
+}
+
+floor_of() { awk -v t="$1" '$1 == "floor" && $2 == t { print $3; exit }' "$MANIFEST"; }
+
+# ---------------------------------------------------------------------------
+# Downloads
+# ---------------------------------------------------------------------------
+
+sha256_of() {
+	if have sha256sum; then
+		sha256sum "$1" | awk '{print $1}'
+	elif have shasum; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	elif have openssl; then
+		openssl dgst -sha256 "$1" | awk '{print $NF}'
+	else
+		return 1
+	fi
+}
+
+fetch() { # fetch URL OUT
+	if [ -n "${RIHLA_OFFLINE:-}" ]; then
+		err "offline install: $1 is not in the bundle"
+		return 1
+	fi
+	if have curl; then
+		curl -fL -sS --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"
+	elif have wget; then
+		wget -q -T 20 -t 3 -O "$2" "$1"
+	else
+		err "need curl or wget to download $1"
+		return 1
+	fi
+}
+
+# fetch_asset URL SHA256 -> prints the path of a verified local copy.
+# Looks in the offline bundle and the download cache first.
+fetch_asset() {
+	local url="$1" sha="$2" name f d got
+	name=$(printf '%s' "$sha" | cut -c1-12)-$(basename "$url")
+	for d in "${OFFLINE_DIR:+$OFFLINE_DIR/downloads}" "$CACHE"; do
+		[ -n "$d" ] && [ -f "$d/$name" ] || continue
+		got=$(sha256_of "$d/$name") || return 1
+		if [ "$got" = "$sha" ]; then
+			printf '%s\n' "$d/$name"
+			return 0
+		fi
+		warn "ignoring $d/$name: checksum mismatch"
+	done
+	mkdir -p "$CACHE" || return 1
+	f=$CACHE/$name
+	fetch "$url" "$f.part" || {
+		rm -f "$f.part"
+		return 1
+	}
+	got=$(sha256_of "$f.part") || {
+		err "no sha256 tool (sha256sum, shasum or openssl) to verify downloads"
+		return 1
+	}
+	if [ "$got" != "$sha" ]; then
+		rm -f "$f.part"
+		err "checksum mismatch for $url"
+		err "  expected $sha"
+		err "  got      $got"
+		return 1
+	fi
+	mv "$f.part" "$f" && printf '%s\n' "$f"
+}
+
+# Rows of the manifest usable on the target platform, best first.
+asset_rows() {
+	awk -v t="$1" -v os="$T_OS" -v arch="$T_ARCH" -v g="$T_GLIBC" '
+	function ge(a, b,   x, y, na, nb, n, i) {
+		na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+		for (i = 1; i <= n; i++) { if (x[i] + 0 > y[i] + 0) return 1; if (x[i] + 0 < y[i] + 0) return 0 }
+		return 1
+	}
+	$1 == "asset" && $2 == t && ($4 == os || $4 == "any") && ($5 == arch || $5 == "any") {
+		if ($6 == "-" || (g != "" && ge(g, $6))) print
+	}' "$MANIFEST"
+}
+
+pinned_version() { awk -v t="$1" '$1 == "asset" && $2 == t { print $3; exit }' "$MANIFEST"; }
+
+# ---------------------------------------------------------------------------
+# Journal: every path rihla creates, links or moves aside, so uninstall can undo it.
+#   mkdir <dir>            directory rihla created (removed if empty)
+#   link  <path>           symlink rihla created
+#   file  <path>           file rihla wrote
+#   tree  <dir>            directory rihla owns entirely (removed)
+#   moved <path> <backup>  pre-existing path moved into the backup directory
+#   rc    <file> <how>     guarded PATH block appended to a shell rc file
+# ---------------------------------------------------------------------------
+
+BACKUP=
+
+j_add() {
+	j_has "$1" "$2" && return 0
+	printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"$JOURNAL"
+}
+
+j_has() {
+	[ -f "$JOURNAL" ] || return 1
+	awk -F "$TAB" -v k="$1" -v p="$2" '$1 == k && $2 == p { f = 1 } END { exit !f }' "$JOURNAL"
+}
+
+j_owns() {
+	[ -f "$JOURNAL" ] || return 1
+	awk -F "$TAB" -v p="$1" '$2 == p && $1 != "moved" && $1 != "rc" { f = 1 } END { exit !f }' "$JOURNAL"
+}
+
+journal_init() {
+	local d missing=''
+	d=$STATE
+	while [ ! -d "$d" ]; do
+		missing="$d$NL$missing"
+		d=$(dirname "$d")
+	done
+	mkdir -p "$STATE" || die "cannot create $STATE"
+	touch "$JOURNAL" || die "cannot write $JOURNAL"
+	printf '%s' "$missing" | while IFS= read -r d; do
+		[ -n "$d" ] && [ "$d" != "$STATE" ] && j_add mkdir "$d"
+	done
+	j_add tree "$STATE"
+}
+
+# Create a directory and any missing parents, recording each one.
+mkdirs() {
+	[ -d "$1" ] && return 0
+	mkdirs "$(dirname "$1")" || return 1
+	mkdir "$1" || return 1
+	j_add mkdir "$1"
+}
+
+# Move a pre-existing path that rihla does not own into this run's backup directory.
+claim() {
+	local p="$1" rel dest
+	j_owns "$p" && return 0
+	[ -e "$p" ] || [ -h "$p" ] || return 0
+	if [ -z "$BACKUP" ]; then
+		BACKUP=$STATE/backup-$(date +%Y%m%d-%H%M%S)
+		mkdir -p "$BACKUP" || die "cannot create $BACKUP"
+	fi
+	case $p in
+	"$HOME"/*) rel=home/${p#"$HOME"/} ;;
+	*) rel=root/${p#/} ;;
+	esac
+	dest=$BACKUP/$rel
+	mkdir -p "$(dirname "$dest")" && mv "$p" "$dest" || die "cannot move $p to $dest"
+	printf '%s\t%s\n' "$p" "$dest" >>"$BACKUP/MANIFEST"
+	j_add moved "$p" "$dest"
+	changed "backed up $p -> $dest"
+}
+
+put_link() { # put_link TARGET PATH
+	local target="$1" p="$2"
+	if [ -h "$p" ] && [ "$(readlink "$p")" = "$target" ]; then
+		j_add link "$p"
+		return 0
+	fi
+	claim "$p"
+	if [ -e "$p" ] || [ -h "$p" ]; then rm -rf "$p"; fi
+	mkdirs "$(dirname "$p")" || die "cannot create $(dirname "$p")"
+	ln -s "$target" "$p" || die "cannot link $p"
+	j_add link "$p"
+	changed "linked $p -> $target"
+}
+
+put_file() { # put_file PATH CONTENT [MODE]
+	local p="$1" content="$2" mode="${3:-}"
+	if [ -f "$p" ] && [ ! -h "$p" ] && j_owns "$p" && [ "$(cat "$p")" = "$content" ]; then
+		return 0
+	fi
+	claim "$p"
+	if [ -e "$p" ] || [ -h "$p" ]; then rm -rf "$p"; fi
+	mkdirs "$(dirname "$p")" || die "cannot create $(dirname "$p")"
+	printf '%s\n' "$content" >"$p" || die "cannot write $p"
+	[ -n "$mode" ] && chmod "$mode" "$p"
+	j_add file "$p"
+	changed "wrote $p"
+}
+
+# A directory rihla owns from now on (nvim data dirs, tools, cache). An existing one that
+# rihla did not create is moved to the backup first.
+own_tree() {
+	j_has tree "$1" && return 0
+	claim "$1"
+	note_parents "$1"
+	j_add tree "$1"
+}
+
+# Record the missing parents of PATH (top-down) so uninstall can remove them again once
+# empty, even when something else (nvim itself) creates them later.
+note_parents() {
+	local d missing=''
+	d=$(dirname "$1")
+	while [ ! -d "$d" ]; do
+		missing="$d$NL$missing"
+		d=$(dirname "$d")
+	done
+	printf '%s' "$missing" | while IFS= read -r d; do
+		[ -n "$d" ] && j_add mkdir "$d"
+	done
+}
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+# Unpack one manifest row into $TOOLS/<tool>-<version>; prints the binary path.
+unpack_asset() {
+	local tool="$1" ver="$2" fmt="$3" sha="$4" url="$5" binpath="$6" dir file tmp
+	dir=$TOOLS/$tool-$ver
+	if [ -f "$dir/.rihla-sha256" ] && [ "$(cat "$dir/.rihla-sha256")" = "$sha" ] && [ -x "$dir/$binpath" ]; then
+		printf '%s\n' "$dir/$binpath"
+		return 0
+	fi
+	file=$(fetch_asset "$url" "$sha") || return 1
+	tmp=$TOOLS/.tmp-$tool-$$
+	rm -rf "$tmp"
+	mkdir -p "$tmp" || return 1
+	case $fmt in
+	tar.gz) gzip -dc "$file" | (cd "$tmp" && tar -xf -) || {
+		rm -rf "$tmp"
+		err "cannot unpack $file"
+		return 1
+	} ;;
+	tar.xz)
+		have xz || {
+			rm -rf "$tmp"
+			err "cannot unpack $file: no xz command"
+			return 1
+		}
+		xz -dc "$file" | (cd "$tmp" && tar -xf -) || {
+			rm -rf "$tmp"
+			err "cannot unpack $file"
+			return 1
+		}
+		;;
+	gz)
+		mkdir -p "$tmp/$(dirname "$binpath")"
+		gzip -dc "$file" >"$tmp/$binpath" || {
+			rm -rf "$tmp"
+			return 1
+		}
+		chmod 755 "$tmp/$binpath"
+		;;
+	esac
+	printf '%s\n' "$sha" >"$tmp/.rihla-sha256"
+	rm -rf "$dir"
+	mv "$tmp" "$dir" || return 1
+	printf '%s\n' "$dir/$binpath"
+	return 2
+}
+
+# install_tool TOOL: installs the pinned build, trying compatible builds in order until one
+# actually runs here. Returns 0 when installed or already current.
+install_tool() {
+	local tool="$1" rows row ver fmt sha url binpath bin rc old_ifs
+	rows=$(asset_rows "$tool")
+	if [ -z "$rows" ]; then
+		warn "$tool: no pinned build for $(platform_label)"
+		return 1
+	fi
+	old_ifs=$IFS
+	IFS=$NL
+	for row in $rows; do
+		IFS=$old_ifs
+		# shellcheck disable=SC2086
+		set -- $row
+		ver=$3 fmt=$7 sha=$8 url=$9
+		shift 9
+		binpath=$1
+		bin=$(unpack_asset "$tool" "$ver" "$fmt" "$sha" "$url" "$binpath")
+		rc=$?
+		[ $rc -eq 1 ] && continue
+		if ! "$bin" --version >/dev/null 2>&1 && ! "$bin" -V >/dev/null 2>&1; then
+			warn "$tool $ver from $url does not run on this machine; trying the next build"
+			rm -rf "${bin%/"$binpath"}"
+			continue
+		fi
+		[ $rc -eq 2 ] && changed "installed $tool $ver ($url)"
+		mkdir -p "$TOOLS/bin"
+		if [ "$(readlink "$TOOLS/bin/$tool" 2>/dev/null)" != "$bin" ]; then
+			rm -f "$TOOLS/bin/$tool"
+			ln -s "$bin" "$TOOLS/bin/$tool"
+		fi
+		prune_versions "$tool" "$ver"
+		return 0
+	done
+	IFS=$old_ifs
+	err "$tool: none of the pinned builds could be installed"
+	return 1
+}
+
+prune_versions() {
+	local d
+	for d in "$TOOLS/$1"-*; do
+		[ -d "$d" ] || continue
+		[ "$d" = "$TOOLS/$1-$2" ] && continue
+		rm -rf "$d" && changed "removed old $(basename "$d")"
+	done
+}
+
+# Should rihla provide TOOL here? Sets WHY either way; true when rihla should.
+needs_tool() {
+	local tool="$1" sys v floor
+	WHY=
+	if j_has link "$BIN/$tool"; then
+		WHY="already managed by rihla"
+		return 0
+	fi
+	sys=$(sys_which "$tool") || {
+		WHY="not installed"
+		return 0
+	}
+	v=$(tool_version "$tool" "$sys")
+	floor=$(floor_of "$tool")
+	if [ -z "$v" ]; then
+		WHY="$sys does not report a version"
+		return 0
+	fi
+	if [ -n "$floor" ] && ! ver_ge "$v" "$floor"; then
+		WHY="system $tool $v is older than $floor"
+		return 0
+	fi
+	WHY="$tool $v (system, $sys)"
+	return 1
+}
+
+tools_step() {
+	local tool why bin
+	step "Tools (into $TOOLS, linked from $BIN)"
+	own_tree "$TOOLS"
+	mkdirs "$TOOLS/bin" || die "cannot create $TOOLS"
+
+	if install_tool nvim; then
+		bin=$(readlink "$TOOLS/bin/nvim")
+	else
+		# No usable pinned build (musl, unusual CPU): a system Neovim 0.11+ will do.
+		bin=$(sys_which nvim) && ver_ge "$(tool_version nvim "$bin")" 0.11 ||
+			die "could not install Neovim and no system nvim 0.11+ found. Run 'rihla check' for details."
+		warn "using the system Neovim $(tool_version nvim "$bin") at $bin instead of the pinned build"
+	fi
+	put_file "$BIN/nvim" "#!/bin/sh
+# Installed by rihla: starts the pinned Neovim with rihla's tools first on PATH.
+PATH=\"$TOOLS/bin:\$PATH\"
+export PATH
+exec \"$bin\" \"\$@\"" 755
+	ok "nvim $(tool_version nvim "$bin") -> $bin"
+
+	for tool in rg fd fzf tmux lazygit; do
+		[ "$tool" = lazygit ] && [ -n "${OPT_MINIMAL:-}" ] && continue
+		if ! needs_tool "$tool"; then
+			ok "$WHY"
+			continue
+		fi
+		why=$WHY
+		if [ -z "$(asset_rows "$tool")" ]; then
+			case $tool in
+			tmux) warn "tmux: no prebuilt build for $(platform_label) ($why). Install it with your package manager (macOS: brew install tmux)." ;;
+			*) warn "$tool: no prebuilt build for $(platform_label) ($why)" ;;
+			esac
+			continue
+		fi
+		if install_tool "$tool"; then
+			put_link "$TOOLS/bin/$tool" "$BIN/$tool"
+			ok "$tool $(pinned_version "$tool") (rihla: $why)"
+		else
+			warn "$tool: could not install; features that need it will be off"
+		fi
+	done
+	put_link "$RIHLA_HOME/bin/rihla" "$BIN/rihla"
+}
+
+# ---------------------------------------------------------------------------
+# Config links
+# ---------------------------------------------------------------------------
+
+nerd_font_present() {
+	# fc-list writes a font cache; point it at a scratch dir so the check leaves no trace.
+	if have fc-list; then
+		local fcc found=''
+		fcc=$(mktemp -d "${TMPDIR:-/tmp}/rihla-fc.XXXXXX") || return 1
+		XDG_CACHE_HOME=$fcc fc-list 2>/dev/null | grep -qi 'nerd font' && found=1
+		rm -rf "$fcc"
+		[ -n "$found" ] && return 0
+	fi
+	if [ "$OS" = darwin ]; then
+		# shellcheck disable=SC2010
+		ls "$HOME/Library/Fonts" /Library/Fonts 2>/dev/null | grep -qi 'nerd' && return 0
+	fi
+	return 1
+}
+
+# term_query SEQUENCE: send a query to the terminal and print its answer (nothing after a
+# second of silence). Needs a terminal on /dev/tty.
+term_query() {
+	local old ans
+	# Called inside $(...), so stdout is a pipe: check for a terminal on /dev/tty instead.
+	{ : </dev/tty; } 2>/dev/null || return 1
+	old=$(stty -g </dev/tty 2>/dev/null) || return 1
+	stty raw -echo min 0 time 10 </dev/tty 2>/dev/null || return 1
+	printf '%b' "$1" >/dev/tty
+	ans=$(dd bs=1 count=256 </dev/tty 2>/dev/null | tr -d '\033\007\\' | tr -c '[:print:]' ' ')
+	stty "$old" </dev/tty 2>/dev/null
+	printf '%s\n' "$ans"
+}
+
+# Which terminal is drawing this, by its own report (XTVERSION). Works over SSH; inside
+# tmux, tmux 3.3+ has the attached terminal's report. Prints e.g. "kitty(0.48.2)".
+terminal_name() {
+	local t=''
+	if [ -n "${TMUX:-}" ] && have tmux; then
+		t=$(tmux display-message -p '#{client_termtype}' 2>/dev/null)
+	fi
+	[ -n "$t" ] || t=$(term_query '\033[>0q' 2>/dev/null | sed -n 's/.*P>|\([^ ]*[^ ]*\).*/\1/p')
+	printf '%s\n' "$t"
+}
+
+# nerd when the terminal is known to draw Nerd Font symbols whatever the font: kitty 0.33+
+# (bundles them), WezTerm and Ghostty (bundle them too). Otherwise prints nothing.
+terminal_icons() {
+	local t v
+	t=$(terminal_name)
+	case $t in
+	kitty*)
+		v=$(printf '%s' "$t" | sed -n 's/^kitty[( ]\([0-9][0-9.]*\).*/\1/p')
+		[ -n "$v" ] && ver_ge "$v" 0.33 && echo nerd
+		;;
+	WezTerm* | wezterm* | ghostty* | Ghostty*) echo nerd ;;
+	esac
+}
+
+icons_mode() {
+	local m="${RIHLA_ICONS:-}"
+	[ -z "$m" ] && [ -f "$USERCFG/icons" ] && m=$(sed -n '1p' "$USERCFG/icons" | tr -d ' \t\r')
+	case $m in nerd | ascii) printf '%s\n' "$m" ;; *) echo ascii ;; esac
+}
+
+# Is the terminal description NAME installed anywhere ncurses looks?
+terminfo_has() {
+	local n="$1" c x d old_ifs
+	have infocmp && infocmp "$n" >/dev/null 2>&1 && return 0
+	c=$(printf '%s' "$n" | cut -c1)
+	x=$(printf '%s' "$c" | od -An -tx1 | tr -d ' \n')
+	old_ifs=$IFS
+	IFS=:
+	for d in ${TERMINFO:-} "$HOME/.terminfo" ${TERMINFO_DIRS:-} /etc/terminfo /lib/terminfo /usr/share/terminfo /usr/lib/terminfo /usr/share/lib/terminfo; do
+		IFS=$old_ifs
+		[ -n "$d" ] || continue
+		if [ -e "$d/$c/$n" ] || [ -e "$d/$x/$n" ]; then return 0; fi
+	done
+	IFS=$old_ifs
+	return 1
+}
+
+# tmux-256color (what programs inside tmux see) and xterm-kitty (what kitty sends over
+# SSH) into ~/.terminfo when the system has none: CentOS/RHEL 7 lacks both, and without
+# xterm-kitty tmux refuses to start there ("missing or unsuitable terminal").
+terminfo_step() {
+	local n c sub dest src
+	for n in tmux-256color xterm-kitty; do
+		c=$(printf '%s' "$n" | cut -c1)
+		src=$RIHLA_HOME/tmux/terminfo/$c/$n
+		[ -f "$src" ] || continue
+		# macOS keeps ~/.terminfo in hex-named directories (74 for t).
+		if [ "$OS" = darwin ]; then sub=$(printf '%s' "$c" | od -An -tx1 | tr -d ' \n'); else sub=$c; fi
+		dest=$HOME/.terminfo/$sub/$n
+		if j_has file "$dest"; then
+			if [ "$(cksum <"$src")" != "$(cksum <"$dest" 2>/dev/null)" ]; then
+				cp "$src" "$dest" && changed "updated $dest"
+			fi
+			ok "terminfo $n: $dest (rihla's copy; the system has none)"
+			continue
+		fi
+		terminfo_has "$n" && continue
+		mkdirs "$(dirname "$dest")" || die "cannot create $(dirname "$dest")"
+		cp "$src" "$dest" || die "cannot write $dest"
+		j_add file "$dest"
+		changed "installed terminfo $n into $dest (the system has none)"
+	done
+}
+
+tmux_stub() {
+	cat <<EOF
+# Written by rihla. Do not edit: put your own settings in
+# $USERCFG/tmux/local.conf (loaded last). 'rihla uninstall' removes this file and
+# restores what was here before.
+set-environment -g RIHLA_HOME '$RIHLA_HOME'
+set-environment -g RIHLA_TMUX '$RIHLA_HOME/tmux'
+set-environment -g RIHLA_CONFIG '$USERCFG'
+source-file '$RIHLA_HOME/tmux/tmux.conf'
+if-shell "test -f '$STATE/tmux-shell.conf'" "source-file '$STATE/tmux-shell.conf'"
+if-shell "test -f '$USERCFG/tmux/local.conf'" "source-file '$USERCFG/tmux/local.conf'"
+EOF
+}
+
+config_step() {
+	local mode
+	step "Config"
+	[ -d "$RIHLA_HOME/nvim" ] || warn "no nvim/ directory in $RIHLA_HOME"
+	put_link "$RIHLA_HOME/nvim" "$NVIM_CONFIG"
+	ok "$NVIM_CONFIG -> $RIHLA_HOME/nvim"
+
+	# tmux 3.1+ also reads $XDG_CONFIG_HOME/tmux/tmux.conf, after ~/.tmux.conf. A config
+	# there would be layered on top of rihla's, so it is moved aside too.
+	if [ -f "$XCONFIG/tmux/tmux.conf" ] && ! j_owns "$XCONFIG/tmux"; then
+		claim "$XCONFIG/tmux"
+	fi
+	put_file "$HOME/.tmux.conf" "$(tmux_stub)"
+	ok "$HOME/.tmux.conf sources $RIHLA_HOME/tmux/tmux.conf"
+	terminfo_step
+
+	# ~/.config/rihla belongs to the user. rihla only creates the icons file when missing.
+	if [ ! -f "$USERCFG/icons" ]; then
+		if [ -n "${OPT_ICONS:-}" ]; then
+			mode=$OPT_ICONS
+		elif nerd_font_present; then
+			mode=nerd
+		elif [ "$(terminal_icons 2>/dev/null)" = nerd ]; then
+			# Over SSH fc-list sees the remote machine's fonts; the terminal says what it draws.
+			mode=nerd
+		else
+			mode=ascii
+		fi
+		mkdirs "$USERCFG" || die "cannot create $USERCFG"
+		printf '%s\n' "$mode" >"$USERCFG/icons"
+		j_add file "$USERCFG/icons"
+		changed "icons: $mode (change with 'rihla icons nerd|ascii')"
+	elif [ -n "${OPT_ICONS:-}" ] && [ "$(icons_mode)" != "$OPT_ICONS" ]; then
+		printf '%s\n' "$OPT_ICONS" >"$USERCFG/icons"
+		changed "icons: $OPT_ICONS"
+	else
+		ok "icons: $(icons_mode) (from $USERCFG/icons)"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Shell rc block: PATH (install) and the shell layer line (rihla shell)
+# ---------------------------------------------------------------------------
+
+RC_BEGIN='# >>> rihla >>>'
+RC_END='# <<< rihla <<<'
+
+# The directory zsh reads its rc files from. ZDOTDIR is often set in ~/.zshenv (HyDE,
+# XDG-style setups) and not exported to a bash that runs this installer, so zsh is asked.
+zdotdir() {
+	local d=''
+	if [ -n "${ZDOTDIR:-}" ]; then
+		d=$ZDOTDIR
+	elif have zsh; then
+		d=$(zsh -c 'print -r -- "@@rihla@@${ZDOTDIR:-$HOME}"' </dev/null 2>/dev/null | sed -n 's/^@@rihla@@//p' | tail -n 1)
+	fi
+	printf '%s\n' "${d:-$HOME}"
+}
+
+rc_file_for() { # rc_file_for bash|zsh|fish|other
+	case $1 in
+	bash)
+		if [ "$OS" = darwin ]; then echo "$HOME/.bash_profile"; else echo "$HOME/.bashrc"; fi
+		;;
+	zsh) echo "$(zdotdir)/.zshrc" ;;
+	fish) echo "$XCONFIG/fish/conf.d/rihla.fish" ;;
+	*) echo "$HOME/.profile" ;;
+	esac
+}
+
+rc_files() { rc_file_for "$(basename "${SHELL:-sh}")"; }
+
+bin_for_rc() { home_for_rc "$BIN"; }
+
+home_for_rc() { # a path as written in an rc file: $HOME/... when under the home directory
+	case $1 in
+	"$HOME"/*) printf '$HOME/%s\n' "${1#"$HOME"/}" ;;
+	*) printf '%s\n' "$1" ;;
+	esac
+}
+
+# The block, from its parts. PATH: '' or 1. LAYER: '', zsh or bash.
+rc_block() { # rc_block PATH LAYER
+	local b l t
+	printf '%s\n' "$RC_BEGIN"
+	if [ -n "$1" ]; then
+		b=$(bin_for_rc)
+		printf '# Added by rihla: puts %s on PATH. Remove with: rihla uninstall\n' "$b"
+		printf 'case ":$PATH:" in *":%s:"*) ;; *) PATH="%s:$PATH"; export PATH ;; esac\n' "$b" "$b"
+		printf '# Ctrl-s (save, in an editor) would freeze an interactive terminal until Ctrl-q.\n'
+		# </dev/tty: with powerlevel10k's instant prompt stdin is not the terminal here.
+		printf 'case $- in *i*) stty -ixon 2>/dev/null </dev/tty ;; esac\n'
+	fi
+	if [ -n "$2" ]; then
+		l=$(home_for_rc "$RIHLA_HOME/shell/$2.rc")
+		t=
+		if [ "$TOOLS" != "$HOME/.local/share/rihla-tools" ]; then
+			t="RIHLA_TOOLS=\"$(home_for_rc "$TOOLS")\"; export RIHLA_TOOLS; "
+		fi
+		printf '# Prompt, autosuggestions, highlighting, fzf keys, zoxide. Remove with: rihla shell --off\n'
+		printf '%s[ -f "%s" ] && . "%s"\n' "$t" "$l" "$l"
+	fi
+	printf '%s\n' "$RC_END"
+}
+
+rc_has_block() { [ -f "$1" ] && grep -qxF "$RC_BEGIN" "$1"; }
+
+# Sets RC_PATH and RC_LAYER from the block now in FILE.
+rc_parts() {
+	local cur
+	RC_PATH='' RC_LAYER=''
+	rc_has_block "$1" || return 1
+	cur=$(awk -v b="$RC_BEGIN" -v e="$RC_END" '$0 == b { on = 1 } on { print } on && $0 == e { on = 0 }' "$1")
+	case $cur in *'PATH="'*) RC_PATH=1 ;; esac
+	case $cur in *'/shell/zsh.rc"'*) RC_LAYER=zsh ;; *'/shell/bash.rc"'*) RC_LAYER=bash ;; esac
+	return 0
+}
+
+rc_how() { awk -F "$TAB" -v p="$1" '$1 == "rc" && $2 == p { print $3; exit }' "$JOURNAL" 2>/dev/null; }
+
+j_del() { # j_del KIND PATH: forget a journal entry
+	local tmp
+	[ -f "$JOURNAL" ] || return 0
+	tmp=$JOURNAL.tmp
+	awk -F "$TAB" -v k="$1" -v p="$2" '!($1 == k && $2 == p)' "$JOURNAL" >"$tmp" && mv "$tmp" "$JOURNAL"
+}
+
+# Write rihla's block in FILE with these parts, replacing the one there in place (an older
+# block is brought up to date). An empty block is removed, leaving the file as it was.
+# Returns 1 when nothing had to change.
+rc_write() { # rc_write FILE PATH LAYER
+	local f="$1" new cur tmp
+	if [ -z "$2" ] && [ -z "$3" ]; then
+		rc_has_block "$f" || return 1
+		rc_remove "$f" "$(rc_how "$f")" || die "cannot rewrite $f"
+		j_del rc "$f"
+		changed "removed rihla's block from $f"
+		return 0
+	fi
+	new=$(rc_block "$2" "$3")
+	if rc_has_block "$f"; then
+		cur=$(awk -v b="$RC_BEGIN" -v e="$RC_END" '$0 == b { on = 1 } on { print } on && $0 == e { on = 0 }' "$f")
+		[ "$cur" = "$new" ] && return 1
+		tmp=$f.rihla-tmp
+		# The new block goes through the environment: awk -v would expand backslashes.
+		RIHLA_RC_NEW=$new awk -v b="$RC_BEGIN" -v e="$RC_END" '
+			$0 == b && !done { print ENVIRON["RIHLA_RC_NEW"]; skip = 1; done = 1; next }
+			skip { if ($0 == e) skip = 0; next }
+			{ print }' "$f" >"$tmp" || die "cannot rewrite $f"
+		# cat, not mv: keeps the file's owner, mode and any link pointing at it.
+		cat "$tmp" >"$f" && rm -f "$tmp" || die "cannot write $f"
+		changed "updated rihla's block in $f"
+		return 0
+	fi
+	rc_add "$f" "$new"
+}
+
+shell_step() {
+	local f b
+	step "Shell"
+	if [ -n "${OPT_NO_SHELL:-}" ]; then
+		ok "skipped (--no-shell). Add $BIN to PATH yourself."
+		return 0
+	fi
+	b=$(bin_for_rc)
+	# One rc file, kept whole: a HOME with a space ("/home/John Smith") must not be split.
+	f=$(rc_files)
+	case $f in
+	*.fish)
+		put_file "$f" "# Added by rihla: puts $b on PATH. 'rihla uninstall' removes this file.
+contains $(printf '%s' "$b" | sed 's/\$HOME/$HOME/') \$PATH; or set -gx PATH $b \$PATH"
+		;;
+	*)
+		rc_parts "$f"
+		if ! rc_write "$f" 1 "$RC_LAYER"; then
+			ok "PATH block already in $f"
+		fi
+		;;
+	esac
+	case ":$PATH:" in
+	*":$BIN:"*) ;;
+	*) say "  note  open a new shell (or run: export PATH=\"$b:\$PATH\") to use the new commands" ;;
+	esac
+}
+
+rc_add() { # rc_add FILE BLOCK
+	local f="$1" how
+	if [ -f "$f" ]; then
+		how=existed
+		# Keep the file byte-identical after uninstall: note a missing final newline.
+		if [ -s "$f" ] && [ "$(tail -c 1 "$f" | od -An -c | tr -d ' ')" != '\n' ]; then
+			how=existed-nonl
+			printf '\n' >>"$f"
+		fi
+	else
+		how=created
+		mkdirs "$(dirname "$f")"
+	fi
+	printf '%s\n' "$2" >>"$f" || die "cannot write $f"
+	j_add rc "$f" "$how"
+	changed "added rihla's block to $f"
+}
+
+rc_remove() { # rc_remove FILE HOW
+	local f="$1" how="$2" tmp
+	[ -f "$f" ] || return 0
+	tmp=$f.rihla-tmp
+	awk -v b="$RC_BEGIN" -v e="$RC_END" '$0 == b { skip = 1; next } skip && $0 == e { skip = 0; next } !skip' "$f" >"$tmp" || return 1
+	case $how in
+	created)
+		if [ -s "$tmp" ]; then mv "$tmp" "$f"; else rm -f "$tmp" "$f"; fi
+		;;
+	existed-nonl)
+		printf '%s' "$(cat "$tmp")" >"$f" && rm -f "$tmp"
+		;;
+	*)
+		cat "$tmp" >"$f" && rm -f "$tmp"
+		;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# Plugins
+# ---------------------------------------------------------------------------
+
+NVIM_BIN=
+
+run_provision() { # run_provision MODE OUTFILE LOGFILE
+	local pid wd rc
+	RIHLA_PROVISION=$1 RIHLA_PROVISION_OUT=$2 RIHLA_LAZY_DIR=$LAZY_DIR \
+		RIHLA_PROVISION_LUA=$RIHLA_HOME/lib/provision.lua PATH="$TOOLS/bin:$PATH" \
+		"$NVIM_BIN" --headless -i NONE --cmd 'lua dofile(vim.env.RIHLA_PROVISION_LUA)' \
+		</dev/null >"$3" 2>&1 &
+	pid=$!
+	# A config that waits for input must not hang the installer forever. The watchdog
+	# exits on its own once nvim is gone (killing it would make some shells print
+	# "Terminated").
+	(
+		n=0
+		while kill -0 "$pid" 2>/dev/null; do
+			n=$((n + 1))
+			if [ "$n" -gt "${RIHLA_PROVISION_TIMEOUT:-900}" ]; then
+				kill "$pid" 2>/dev/null
+				break
+			fi
+			sleep 1
+		done
+	) >/dev/null 2>&1 &
+	wd=$!
+	wait "$pid"
+	rc=$?
+	wait "$wd" 2>/dev/null
+	return $rc
+}
+
+lock_entry() { # lock_entry NAME -> "commit branch"
+	sed -n "s/^[[:space:]]*\"$1\": *{ *\"branch\": *\"\\([^\"]*\\)\", *\"commit\": *\"\\([0-9a-f]*\\)\".*/\\2 \\1/p" \
+		"$RIHLA_HOME/nvim/lazy-lock.json" | head -n 1
+}
+
+plugin_mode() {
+	local v
+	case ${RIHLA_PLUGIN_FETCH:-} in git | tarball)
+		echo "$RIHLA_PLUGIN_FETCH"
+		return
+		;;
+	esac
+	[ -n "$OFFLINE_DIR" ] && {
+		echo tarball
+		return
+	}
+	command -v git >/dev/null 2>&1 || {
+		echo tarball
+		return
+	}
+	v=$(git --version 2>/dev/null | ver_of)
+	if [ -n "$v" ] && ver_ge "$v" "$(floor_of git)"; then echo git; else echo tarball; fi
+}
+
+# Download github.com/OWNER/REPO at COMMIT into DIR, with a minimal .git that lets lazy.nvim
+# read the commit and branch (HEAD and refs only, no objects).
+seed_tarball() { # seed_tarball URL COMMIT BRANCH DIR
+	local url="$1" commit="$2" branch="${3:-main}" dir="$4" slug name f d tmp top
+	slug=${url#https://github.com/}
+	slug=${slug%.git}
+	case $url in https://github.com/*/*) ;; *)
+		err "$url is not on github.com; tarball mode cannot fetch it (install git >= $(floor_of git))"
+		return 1
+		;;
+	esac
+	name=$(printf '%s' "$slug" | tr '/' '_')-$commit.tar.gz
+	f=
+	for d in "${OFFLINE_DIR:+$OFFLINE_DIR/plugins}" "$CACHE_ROOT/plugins"; do
+		[ -n "$d" ] && [ -s "$d/$name" ] && f=$d/$name && break
+	done
+	if [ -z "$f" ]; then
+		mkdir -p "$CACHE_ROOT/plugins"
+		f=$CACHE_ROOT/plugins/$name
+		fetch "https://codeload.github.com/$slug/tar.gz/$commit" "$f.part" || {
+			rm -f "$f.part"
+			return 1
+		}
+		mv "$f.part" "$f"
+	fi
+	tmp=$(dirname "$dir")/.rihla-tmp-$$
+	rm -rf "$tmp"
+	mkdir -p "$tmp"
+	gzip -dc "$f" | (cd "$tmp" && tar -xf -) || {
+		rm -rf "$tmp"
+		err "cannot unpack $f"
+		return 1
+	}
+	top=$(ls "$tmp" | head -n 1)
+	rm -rf "$dir"
+	mv "$tmp/$top" "$dir" && rm -rf "$tmp" || return 1
+	mkdir -p "$dir/.git/objects" "$dir/.git/refs/tags" \
+		"$(dirname "$dir/.git/refs/heads/$branch")" "$(dirname "$dir/.git/refs/remotes/origin/$branch")"
+	printf 'ref: refs/heads/%s\n' "$branch" >"$dir/.git/HEAD"
+	printf '%s\n' "$commit" >"$dir/.git/refs/heads/$branch"
+	printf '%s\n' "$commit" >"$dir/.git/refs/remotes/origin/$branch"
+	printf 'ref: refs/remotes/origin/%s\n' "$branch" >"$dir/.git/refs/remotes/origin/HEAD"
+	printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote "origin"]\n\turl = %s\n' "$url" >"$dir/.git/config"
+	printf '%s\n' "$commit" >"$dir/.git/rihla-tarball"
+}
+
+seed_lazy() { # seed_lazy MODE
+	local mode="$1" entry commit branch head
+	entry=$(lock_entry lazy.nvim)
+	commit=${entry%% *} branch=${entry#* }
+	[ -n "$commit" ] || {
+		err "nvim/lazy-lock.json has no lazy.nvim entry"
+		return 1
+	}
+	if [ "$mode" = git ]; then
+		if [ -f "$LAZY_DIR/.git/rihla-tarball" ]; then rm -rf "$LAZY_DIR"; fi
+		if [ ! -d "$LAZY_DIR/.git" ]; then
+			rm -rf "$LAZY_DIR"
+			mkdir -p "$(dirname "$LAZY_DIR")"
+			git clone -q --filter=blob:none --no-checkout https://github.com/folke/lazy.nvim.git "$LAZY_DIR" || return 1
+		fi
+		head=$(cd "$LAZY_DIR" && git rev-parse HEAD 2>/dev/null)
+		if [ "$head" != "$commit" ]; then
+			(cd "$LAZY_DIR" && { git checkout -q "$commit" 2>/dev/null ||
+				{ git fetch -q origin && git checkout -q "$commit"; }; }) || return 1
+			changed "lazy.nvim at $commit"
+		fi
+	else
+		if [ "$(cat "$LAZY_DIR/.git/rihla-tarball" 2>/dev/null)" != "$commit" ]; then
+			mkdir -p "$(dirname "$LAZY_DIR")"
+			seed_tarball https://github.com/folke/lazy.nvim.git "$commit" "$branch" "$LAZY_DIR" || return 1
+			changed "lazy.nvim at $commit (tarball)"
+		fi
+	fi
+}
+
+show_provision_failure() {
+	grep "^FAIL" "$1" 2>/dev/null | cut -f2- | sed 's/^/  /' >&2
+	if [ -s "$2" ]; then
+		err "nvim output (last 30 lines of $2):"
+		tail -n 30 "$2" >&2
+	fi
+}
+
+tarball_dirs_present() {
+	local f
+	for f in "$NVIM_DATA"/lazy/*/.git/rihla-tarball; do
+		[ -f "$f" ] && return 0
+	done
+	return 1
+}
+
+plugins_step() {
+	local mode tsv log ctsv name url dir commit branch n=0
+	step "Plugins"
+	if [ -n "${OPT_NO_PLUGINS:-}" ]; then
+		ok "skipped (--no-plugins)"
+		return 0
+	fi
+	if [ ! -f "$RIHLA_HOME/nvim/init.lua" ] || [ ! -f "$RIHLA_HOME/nvim/lazy-lock.json" ]; then
+		warn "no nvim/init.lua or nvim/lazy-lock.json in $RIHLA_HOME; skipping plugins"
+		return 0
+	fi
+	NVIM_BIN=$TOOLS/bin/nvim
+	mode=$(plugin_mode)
+	tsv=$STATE/logs/plugins.tsv log=$STATE/logs/provision.log
+
+	# Already provisioned at the lockfile commits? Then there is nothing to do (and nothing
+	# is written, so a second install leaves the home directory untouched).
+	# In git mode, directories left from tarball mode (git was too old before) are
+	# replaced with real clones, so the quick check is skipped while any remain.
+	if [ "$mode" = git ] && tarball_dirs_present; then
+		say "  ...   git is usable now: replacing tarball plugin directories with clones"
+	elif [ -d "$LAZY_DIR" ]; then
+		ctsv=$(mktemp "${TMPDIR:-/tmp}/rihla-check.XXXXXX") || die "mktemp failed"
+		if run_provision check "$ctsv" "$ctsv.log"; then
+			ok "$(grep -c '^ok' "$ctsv") plugins at lockfile commits ($mode mode)"
+			rm -f "$ctsv" "$ctsv.log"
+			return 0
+		fi
+		rm -f "$ctsv" "$ctsv.log"
+	fi
+
+	mkdir -p "$STATE/logs"
+	say "  ...   fetching plugins ($mode mode), this takes a minute"
+	seed_lazy "$mode" || die "could not fetch lazy.nvim"
+	run_provision list "$tsv" "$log" || {
+		show_provision_failure "$tsv" "$log"
+		die "could not read the plugin list from the nvim config"
+	}
+	while IFS="$TAB" read -r name url dir commit branch; do
+		[ "$name" = lazy.nvim ] && continue
+		case $name in FAIL | WARN | ok) continue ;; esac
+		if [ "$mode" = git ]; then
+			# Left over from tarball mode: let lazy clone it properly.
+			[ -f "$dir/.git/rihla-tarball" ] && rm -rf "$dir"
+			continue
+		fi
+		[ -n "$commit" ] || {
+			warn "$name has no lockfile entry; skipped"
+			continue
+		}
+		[ "$(cat "$dir/.git/rihla-tarball" 2>/dev/null)" = "$commit" ] && continue
+		seed_tarball "$url" "$commit" "$branch" "$dir" || die "could not fetch $name ($url)"
+		n=$((n + 1))
+	done <"$tsv"
+	[ $n -gt 0 ] && changed "fetched $n plugins as tarballs"
+
+	if [ "$mode" = git ]; then
+		run_provision restore "$tsv" "$log"
+	else
+		run_provision build "$tsv" "$log"
+	fi || {
+		show_provision_failure "$tsv" "$log"
+		die "plugin provisioning failed (full log: $log)"
+	}
+	changed "$(grep -c '^ok' "$tsv") plugins installed at lockfile commits ($mode mode)"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+preflight() {
+	local missing='' c
+	for c in uname tar gzip mkdir ln mv rm cp sed awk grep head tail cut tr sort date readlink dirname basename od; do
+		have "$c" || missing="$missing $c"
+	done
+	if [ -z "$OFFLINE_DIR" ] && ! have curl && ! have wget; then missing="$missing curl-or-wget"; fi
+	if ! have sha256sum && ! have shasum && ! have openssl; then missing="$missing sha256sum-or-shasum-or-openssl"; fi
+	if [ -n "$missing" ]; then
+		err "missing required commands:$missing"
+		err "rihla needs these basic tools; ask your administrator, or use a machine that has them to build an offline bundle (rihla bundle)."
+		exit 2
+	fi
+}
+
+# The lock is a directory (mkdir is atomic everywhere) holding the owner's PID, so a run
+# that died without cleaning up (SIGKILL, a closed SSH session) does not block the next one.
+lock_alive() { # lock_alive PID: running, and not a zombie nobody has reaped yet
+	[ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+	have ps || return 0
+	case $(ps -o stat= -p "$1" 2>/dev/null) in Z*) return 1 ;; esac
+	return 0
+}
+
+lock_or_die() {
+	local holder
+	if ! mkdir "$STATE/lock" 2>/dev/null; then
+		holder=$(cat "$STATE/lock/pid" 2>/dev/null)
+		if lock_alive "$holder"; then
+			die "another rihla run (PID $holder) is in progress; wait for it to finish"
+		fi
+		# No PID yet may mean the other run is between mkdir and writing it: give it a moment.
+		[ -n "$holder" ] || sleep 2
+		holder=$(cat "$STATE/lock/pid" 2>/dev/null)
+		if lock_alive "$holder"; then
+			die "another rihla run (PID $holder) is in progress; wait for it to finish"
+		fi
+		warn "removing a stale lock left by an interrupted run${holder:+ (PID $holder)}"
+		rm -rf "$STATE/lock"
+		mkdir "$STATE/lock" 2>/dev/null || die "cannot take $STATE/lock (another rihla run started just now?)"
+	fi
+	printf '%s\n' "$$" >"$STATE/lock/pid"
+	trap 'rm -rf "$STATE/lock"' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
+cmd_install() {
+	local pki_before hsts_before tool f k
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--icons)
+			OPT_ICONS=${2:-}
+			shift
+			;;
+		--icons=*) OPT_ICONS=${1#--icons=} ;;
+		--no-shell) OPT_NO_SHELL=1 ;;
+		--shell) OPT_SHELL_LAYER=1 ;;
+		--no-plugins) OPT_NO_PLUGINS=1 ;;
+		--minimal) OPT_MINIMAL=1 ;;
+		--offline-dir)
+			OFFLINE_DIR=${2:-}
+			shift
+			;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*) die "install: unknown option $1" ;;
+		esac
+		shift
+	done
+	case ${OPT_ICONS:-} in '' | nerd | ascii) ;; *) die "--icons takes nerd or ascii" ;; esac
+	if [ -n "$OFFLINE_DIR" ]; then
+		RIHLA_OFFLINE=1
+		export RIHLA_OFFLINE
+	fi
+	detect_platform
+	preflight
+	[ "$OS" = linux ] || [ "$OS" = darwin ] || die "unsupported OS: $(uname -s)"
+	if [ "$OS" = linux ] && [ "$LIBC" != glibc ]; then
+		warn "this looks like a musl system; Neovim has no musl build, so the pinned nvim may not run"
+	fi
+	if [ "$(id -u)" = 0 ] && [ -z "${RIHLA_ALLOW_ROOT:-}" ]; then
+		warn "running as root: everything goes into $HOME. rihla never needs root."
+	fi
+	say "${C_B}rihla $(cat "$RIHLA_HOME/VERSION" 2>/dev/null)${C_0} on $(platform_label), installing for $HOME"
+	journal_init
+	lock_or_die
+	pki_before=
+	[ -d "$HOME/.pki" ] && pki_before=1
+	hsts_before=
+	[ -e "$HOME/.wget-hsts" ] && hsts_before=1
+	# Only a copy that install.sh created is rihla's to delete; a checkout you run
+	# bin/rihla from directly stays yours.
+	if [ -n "${RIHLA_HOME_CREATED:-}" ]; then
+		printf '%s\n' "${RIHLA_CREATED_DIRS:-}" | while IFS= read -r d; do
+			[ -n "$d" ] && j_add mkdir "$d"
+		done
+		j_add tree "$RIHLA_HOME"
+	fi
+	# A cache you point RIHLA_CACHE at is yours (shared between machines or CI runs).
+	if [ -n "${RIHLA_CACHE:-}" ]; then mkdir -p "$CACHE_ROOT"; else own_tree "$CACHE_ROOT"; fi
+	[ -n "${RIHLA_HOME_CHANGED:-}" ] && CHANGES=$((CHANGES + 1))
+
+	# Old plugin trees and state would fight the pinned ones, so they go to the backup.
+	# Done first: even `nvim --version` creates nvim's state directory.
+	own_tree "$NVIM_DATA"
+	own_tree "$NVIM_STATE"
+	own_tree "$NVIM_CACHE"
+
+	tools_step
+	config_step
+	shell_step
+	plugins_step
+	# The shell layer's files from a bundle go into the download cache, so a later
+	# `rihla shell` works on this offline machine too.
+	if [ -n "$OFFLINE_DIR" ]; then
+		for tool in $SHELL_TOOLS_ALL; do
+			asset_rows "$tool" | while read -r _ _ _ _ _ _ _ sha url _; do
+				f=$(printf '%s' "$sha" | cut -c1-12)-$(basename "$url")
+				[ -f "$OFFLINE_DIR/downloads/$f" ] && [ ! -f "$CACHE/$f" ] && mkdir -p "$CACHE" && cp "$OFFLINE_DIR/downloads/$f" "$CACHE/$f"
+			done
+		done
+	fi
+	if [ -n "${OPT_SHELL_LAYER:-}" ]; then
+		k=$(shell_kind) || die "--shell: the shell layer is for zsh and bash; your shell is ${SHELL:-unknown}"
+		shell_on "$k"
+	fi
+
+	# NSS-based curl (CentOS/RHEL 7) creates an empty ~/.pki/nssdb on first use, during
+	# this install or later when nvim downloads a language server. Claimed when it was not
+	# there before, so uninstall removes it again if it is still empty.
+	if [ -z "$pki_before" ]; then
+		j_add mkdir "$HOME/.pki"
+		j_add mkdir "$HOME/.pki/nssdb"
+	fi
+	# wget (no curl: Debian's minimal images) keeps an HSTS cache in ~/.wget-hsts, written
+	# by this install or later by mason's downloads. Claimed when it was not there before.
+	if [ -z "$hsts_before" ]; then
+		j_add file "$HOME/.wget-hsts"
+	fi
+	# The tree-sitter CLI (used by nvim to build parsers) leaves an empty lock directory in
+	# $XDG_CACHE_HOME/tree-sitter. Claimed when it is not there yet, so uninstall can
+	# remove it again once empty.
+	if [ ! -e "$XCACHE/tree-sitter" ] || j_has mkdir "$XCACHE/tree-sitter"; then
+		note_parents "$XCACHE/tree-sitter/lock"
+		j_add mkdir "$XCACHE/tree-sitter"
+		j_add mkdir "$XCACHE/tree-sitter/lock"
+	fi
+
+	step "Summary"
+	if [ "$CHANGES" -eq 0 ]; then
+		say "  Nothing to do: everything is already installed and up to date."
+	else
+		say "  $CHANGES change(s) made."
+	fi
+	[ -n "$BACKUP" ] && say "  Previous config saved in $BACKUP (restored by 'rihla uninstall')."
+	[ "$WARNINGS" -gt 0 ] && say "  $WARNINGS warning(s) above; 'rihla check' explains each one."
+	say ""
+	start_here
+	return 0
+}
+
+cmd_uninstall() {
+	local jcopy kind p extra conflict keep_home
+	detect_platform
+	[ -f "$JOURNAL" ] || die "nothing to uninstall: no journal at $JOURNAL"
+	jcopy=$(mktemp "${TMPDIR:-/tmp}/rihla-journal.XXXXXX") || die "mktemp failed"
+	awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$JOURNAL" >"$jcopy"
+	step "Uninstalling rihla from $HOME"
+
+	while IFS="$TAB" read -r kind p extra; do
+		case $kind in
+		link) [ -h "$p" ] && rm -f "$p" && say "  removed $p" ;;
+		file) [ -f "$p" ] && rm -f "$p" && say "  removed $p" ;;
+		tree)
+			[ "$p" = "$RIHLA_HOME" ] || [ "$p" = "$STATE" ] && continue
+			[ -e "$p" ] && rm -rf "$p" && say "  removed $p"
+			;;
+		rc) rc_remove "$p" "$extra" && say "  removed PATH block from $p" ;;
+		esac
+	done <"$jcopy"
+
+	# Restore what was there before, oldest move last so nested moves unwind correctly.
+	while IFS="$TAB" read -r kind p extra; do
+		[ "$kind" = moved ] || continue
+		[ -e "$extra" ] || [ -h "$extra" ] || {
+			warn "backup $extra is missing; cannot restore $p"
+			continue
+		}
+		if [ -e "$p" ] || [ -h "$p" ]; then
+			conflict=$p.rihla-conflict-$(date +%Y%m%d-%H%M%S)
+			mv "$p" "$conflict"
+			warn "$p was recreated after install; moved it to $conflict"
+		fi
+		mkdir -p "$(dirname "$p")"
+		mv "$extra" "$p" && say "  restored $p"
+	done <"$jcopy"
+
+	rm -rf "$STATE"
+	keep_home=1
+	if grep -q "^tree$TAB$RIHLA_HOME$TAB" "$jcopy"; then
+		# This script lives inside RIHLA_HOME; sh keeps reading it from the open file.
+		rm -rf "$RIHLA_HOME" && say "  removed $RIHLA_HOME"
+		keep_home=
+	fi
+	# Directories rihla created, deepest first, each removed only if empty.
+	awk -F "$TAB" '$1 == "mkdir" { p = $2; n = gsub("/", "/", p); print n "\t" $2 }' "$jcopy" |
+		sort -rn | cut -f2- | while IFS= read -r p; do
+		rmdir "$p" 2>/dev/null
+	done
+	rm -f "$jcopy"
+	[ -n "$keep_home" ] && say "  kept $RIHLA_HOME (you ran rihla from it directly; it is yours)"
+	say "Done. $USERCFG (your overrides) was left in place."
+	exit 0
+}
+
+cmd_update() {
+	local tmp new old offline=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--offline)
+			offline=${2:-}
+			shift
+			;;
+		*) break ;;
+		esac
+		shift
+	done
+	detect_platform
+	step "Updating $RIHLA_HOME"
+	if [ -n "$offline" ]; then
+		[ -f "$offline" ] || die "no such bundle: $offline"
+		exec sh "$RIHLA_HOME/install.sh" --offline "$offline" --home "$RIHLA_HOME" "$@"
+	fi
+	if [ -d "$RIHLA_HOME/.git" ] && have git; then
+		(
+			cd "$RIHLA_HOME" || exit 1
+			# lazy.nvim rewrites the lockfile after restores; the repo's copy wins.
+			git checkout -q -- nvim/lazy-lock.json 2>/dev/null
+			git fetch -q --depth 1 origin "$REPO_REF" && git reset -q --hard FETCH_HEAD
+		) || die "git update failed in $RIHLA_HOME"
+		ok "now at $(cd "$RIHLA_HOME" && git rev-parse --short HEAD)"
+	else
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/rihla-update.XXXXXX") || die "mktemp failed"
+		fetch "$REPO_URL/archive/$REPO_REF.tar.gz" "$tmp/src.tar.gz" || die "download failed"
+		mkdir "$tmp/x" && gzip -dc "$tmp/src.tar.gz" | (cd "$tmp/x" && tar -xf -) || die "cannot unpack update"
+		new=$tmp/x/$(ls "$tmp/x" | head -n 1)
+		[ -f "$new/bin/rihla" ] || die "downloaded tree has no bin/rihla"
+		# Same fingerprint install.sh keeps, so a later install.sh run sees it as current.
+		(cd "$new" && tar -cf - --exclude=.git --exclude=.rihla-source . 2>/dev/null) | cksum |
+			awk '{print $1 "-" $2}' >"$new/.rihla-source"
+		old=$RIHLA_HOME.old-$$
+		mv "$RIHLA_HOME" "$old" && mv "$new" "$RIHLA_HOME" || {
+			[ -d "$old" ] && [ ! -d "$RIHLA_HOME" ] && mv "$old" "$RIHLA_HOME"
+			die "could not replace $RIHLA_HOME"
+		}
+		rm -rf "$old" "$tmp"
+		ok "replaced with $REPO_URL@$REPO_REF"
+	fi
+	# Re-run the (new) installer so tools and plugins move to the new pins.
+	sh "$RIHLA_HOME/bin/rihla" install "$@" || exit $?
+	# With git, also let the config tidy up after itself (:Rihla sync): plugins dropped from
+	# the lockfile are removed and installed tree-sitter parsers are rebuilt for the new
+	# nvim-treesitter. Tarball mode has no git for lazy to work with; the install did it all.
+	if [ "$(plugin_mode)" = git ] && [ -x "$BIN/nvim" ]; then
+		step "Syncing plugins and parsers"
+		mkdir -p "$STATE/logs"
+		if "$BIN/nvim" --headless "+Rihla sync" +qa </dev/null >"$STATE/logs/sync.log" 2>&1; then
+			ok "done"
+		else
+			warn "':Rihla sync' reported a problem; see $STATE/logs/sync.log"
+		fi
+	fi
+}
+
+# --------------------------------------------------------------------------- shell layer
+
+SHELL_TOOLS_ZSH="starship zoxide zsh-autosuggestions zsh-syntax-highlighting zsh-completions"
+SHELL_TOOLS_BASH="starship zoxide blesh"
+SHELL_TOOLS_FISH="starship zoxide fish"
+SHELL_TOOLS_ALL="starship zoxide zsh-autosuggestions zsh-syntax-highlighting zsh-completions blesh fish"
+
+# shell_component TOOL: unpack the pinned build into $TOOLS/TOOL-VERSION and link it from
+# $TOOLS/shell (binaries in shell/bin, script trees as shell/TOOL). Binaries must run here.
+shell_component() {
+	local tool="$1" rows row ver fmt sha url binpath p rc old_ifs link target
+	rows=$(asset_rows "$tool")
+	if [ -z "$rows" ]; then
+		warn "$tool: no build for $(platform_label)"
+		return 1
+	fi
+	old_ifs=$IFS
+	IFS=$NL
+	for row in $rows; do
+		IFS=$old_ifs
+		# shellcheck disable=SC2086
+		set -- $row
+		ver=$3 fmt=$7 sha=$8 url=$9
+		shift 9
+		binpath=$1
+		p=$(unpack_asset "$tool" "$ver" "$fmt" "$sha" "$url" "$binpath")
+		rc=$?
+		[ $rc -eq 1 ] && continue
+		case $binpath in
+		*.sh | *.zsh)
+			link=$TOOLS/shell/$tool target=$(dirname "$p")
+			;;
+		*)
+			# starship writes a log directory even for --version: keep it out of $HOME.
+			if ! STARSHIP_CACHE=${TMPDIR:-/tmp}/rihla-starship-$$ "$p" --version >/dev/null 2>&1; then
+				rm -rf "${TMPDIR:-/tmp}/rihla-starship-$$"
+				warn "$tool $ver from $url does not run on this machine"
+				rm -rf "$TOOLS/$tool-$ver"
+				continue
+			fi
+			rm -rf "${TMPDIR:-/tmp}/rihla-starship-$$"
+			link=$TOOLS/shell/bin/$tool target=$p
+			;;
+		esac
+		if [ "$(readlink "$link" 2>/dev/null)" != "$target" ]; then
+			rm -f "$link"
+			ln -s "$target" "$link" || return 1
+		fi
+		[ $rc -eq 2 ] && changed "installed $tool $ver"
+		prune_versions "$tool" "$ver"
+		ok "$tool $ver"
+		return 0
+	done
+	IFS=$old_ifs
+	return 1
+}
+
+# run_timeout SECONDS OUTFILE COMMAND...: run with stdin from /dev/null, give up after a while.
+run_timeout() {
+	local secs="$1" out="$2" pid
+	shift 2
+	"$@" </dev/null >"$out" 2>&1 &
+	pid=$!
+	(
+		n=0
+		while kill -0 "$pid" 2>/dev/null; do
+			n=$((n + 1))
+			[ "$n" -gt "$secs" ] && kill "$pid" 2>/dev/null && break
+			sleep 1
+		done
+	) >/dev/null 2>&1 &
+	wait "$pid"
+	wait $! 2>/dev/null
+}
+
+# Start an interactive KIND shell with the user's own rc files and print what rihla's layer
+# switched on and skipped there: "on <pieces>" and "skip <piece:reason|...>" lines.
+shell_probe() {
+	local kind="$1" tmp login=
+	tmp=$(mktemp "${TMPDIR:-/tmp}/rihla-probe.XXXXXX") || return 1
+	[ "$OS" = darwin ] && login=-l
+	case $kind in
+	# unset HISTFILE at the end: the test shell must not write your history file on exit.
+	zsh) run_timeout 20 "$tmp" zsh -i -c 'print -r -- "@@rihla on ${rihla_shell_on[*]}"; print -r -- "@@rihla skip ${(j:|:)rihla_shell_skipped}"; print -r -- "@@rihla loaded ${rihla_shell_loaded:-no}"; unset HISTFILE' ;;
+	# On macOS rihla's line is in ~/.bash_profile, which only a login bash reads (as
+	# terminals there start one).
+	bash) run_timeout 20 "$tmp" bash ${login:+"$login"} -i -c 'echo "@@rihla on ${rihla_shell_on:-}"; echo "@@rihla skip $(echo "${rihla_shell_skipped:-}" | tr " " "|")"; echo "@@rihla loaded ${rihla_shell_loaded:-no}"; unset HISTFILE' ;;
+	esac
+	# readline may print a terminal sequence (ESC[?1034h, on macOS) right before the
+	# marker on the same line, so match the marker anywhere on the line.
+	sed -n 's/.*@@rihla //p' "$tmp"
+	rm -f "$tmp"
+}
+
+# One line per skipped piece, in words.
+shell_explain() { # shell_explain "piece:reason|piece:reason"
+	printf '%s\n' "$1" | tr '|' '\n' | while IFS= read -r s; do
+		[ -n "$s" ] || continue
+		p=${s%%:*} r=${s#*:}
+		case $p in
+		blesh) p="ble.sh (autosuggestions and highlighting)" ;;
+		highlighting) p="syntax highlighting" ;;
+		search) p="rg and fd defaults, rgi and ff" ;;
+		fzf) p="fzf key bindings" ;;
+		completion) p="completion setup (compinit)" ;;
+		history) p="history settings" ;;
+		keys) p="key bindings" ;;
+		esac
+		case $r in
+		yours* | your-own* | 'your own'*) printf 'you already have your own %s; rihla'"'"'s is not enabled\n' "$p" ;;
+		RIHLA_SHELL_NO) printf '%s: off (RIHLA_SHELL_NO)\n' "$p" ;;
+		needs-a-terminal) ;;
+		missing-*) printf '%s: not enabled (it needs these commands, missing here: %s)\n' "$p" "$(printf '%s' "${r#missing-}" | sed 's/,/, /g')" ;;
+		*) case $p in
+			prompt) printf 'you already have %s; rihla'"'"'s prompt is not enabled\n' "$r" ;;
+			*) printf '%s: not enabled (%s)\n' "$p" "$r" ;;
+			esac ;;
+		esac
+	done
+}
+
+shell_kind() { # the shell the layer is for: --for, else $SHELL
+	local k
+	k=${1:-$(basename "${SHELL:-sh}")}
+	case $k in zsh | bash) printf '%s\n' "$k" ;; *) return 1 ;; esac
+}
+
+shell_on() {
+	local kind="$1" f tool tools out on skip
+	step "Shell layer for $kind"
+	have "$kind" || die "$kind is not installed here"
+	own_tree "$TOOLS"
+	mkdirs "$TOOLS/shell/bin" || die "cannot create $TOOLS/shell"
+	if [ "$kind" = zsh ]; then tools=$SHELL_TOOLS_ZSH; else tools=$SHELL_TOOLS_BASH; fi
+	for tool in $tools; do
+		if ! shell_component "$tool"; then
+			case $tool in
+			starship) warn "starship cannot run here; a plain $kind prompt in the same colours is used" ;;
+			blesh) warn "ble.sh not installed (it needs xz to unpack); bash gets no autosuggestions or highlighting" ;;
+			*) warn "$tool could not be installed; that piece stays off" ;;
+			esac
+		fi
+	done
+	# ble.sh keeps a cache and state of its own; when rihla brought it, uninstall removes them.
+	if [ "$kind" = bash ]; then
+		for f in "$XCACHE/blesh" "$XSTATE/blesh"; do
+			if [ ! -e "$f" ] && ! j_has tree "$f"; then
+				note_parents "$f"
+				j_add tree "$f"
+			fi
+		done
+	fi
+	f=$(rc_file_for "$kind")
+	rc_parts "$f"
+	if ! rc_write "$f" "$RC_PATH" "$kind"; then
+		ok "already on in $f"
+	fi
+	printf '%s\n' "$kind" >"$STATE/shell-layer"
+	out=$(shell_probe "$kind")
+	on=$(printf '%s\n' "$out" | sed -n 's/^on //p')
+	skip=$(printf '%s\n' "$out" | sed -n 's/^skip //p')
+	case $skip in *blesh:needs-a-terminal*) on="$on blesh" ;; esac
+	if [ -n "$on" ]; then
+		ok "on in a new $kind: $on"
+	else
+		warn "a test $kind did not load the layer; check $f"
+	fi
+	shell_explain "$skip" | while IFS= read -r l; do say "  note  $l"; done
+	if [ "$kind" = bash ] && have zsh; then
+		say "  note  zsh is installed here too; to use it: chsh -s $(command -v zsh), then rihla shell"
+	fi
+	say "  Open a new terminal (or type: exec $kind) to use it. Off again: rihla shell --off"
+}
+
+# --------------------------------------------------------------------------- fish in tmux
+
+# fish in rihla's tmux only: tmux's default-command, set from $STATE/tmux-shell.conf (which
+# ~/.tmux.conf sources). Your login shell and its rc files stay as they are.
+FISH_RC_REL=shell/fish/rihla.fish
+
+fish_bin() { # the fish rihla's tmux starts: rihla's pinned build, else a system fish 3.6+
+	local v
+	if [ -x "$TOOLS/shell/bin/fish" ]; then
+		printf '%s\n' "$TOOLS/shell/bin/fish"
+	elif have fish; then
+		v=$(fish --version 2>/dev/null | ver_of)
+		ver_ge "${v:-0}" 3.6 && command -v fish
+	else
+		return 1
+	fi
+}
+
+fish_probe() { # prints "on <pieces>" and "skip <piece:reason|...>" from a fish with the layer
+	local fb tmp
+	fb=$(fish_bin) || return 1
+	tmp=$(mktemp "${TMPDIR:-/tmp}/rihla-probe.XXXXXX") || return 1
+	run_timeout 20 "$tmp" "$fb" -i -C "source '$RIHLA_HOME/$FISH_RC_REL'" -c 'echo "@@rihla on $rihla_shell_on"; echo "@@rihla skip "(string join "|" -- $rihla_shell_skipped)'
+	sed -n 's/.*@@rihla //p' "$tmp"
+	rm -f "$tmp"
+}
+
+fish_on() {
+	local tool fb out on skip c d
+	step "fish in rihla's tmux"
+	own_tree "$TOOLS"
+	mkdirs "$TOOLS/shell/bin" || die "cannot create $TOOLS/shell"
+	for tool in $SHELL_TOOLS_FISH; do
+		if ! shell_component "$tool"; then
+			case $tool in
+			fish) ;;
+			starship) warn "starship cannot run here; fish gets a plain prompt in the same colours" ;;
+			*) warn "$tool could not be installed; that piece stays off" ;;
+			esac
+		fi
+	done
+	if ! fb=$(fish_bin); then
+		if [ -z "$(asset_rows fish)" ]; then
+			warn "fish: no pinned build for $(platform_label) and no fish 3.6+ here (macOS: brew install fish); tmux keeps your shell"
+		elif ! have xz; then
+			warn "fish not installed: unpacking it needs xz, which this machine does not have (ask for the xz package); tmux keeps your shell"
+		else
+			warn "fish could not be installed; tmux keeps your shell"
+		fi
+		return 1
+	fi
+	# fish makes its config and cache directories on first start. When rihla's fish is the
+	# one that makes them, --off and uninstall remove them (fish's history, in
+	# ~/.local/share/fish, stays: it is yours).
+	for d in "$XCONFIG/fish" "$XCACHE/fish"; do
+		if [ ! -e "$d" ] && ! j_has tree "$d"; then
+			note_parents "$d"
+			j_add tree "$d"
+		fi
+	done
+	c="# Written by 'rihla shell --fish': rihla's tmux opens fish in new windows and panes.
+# 'rihla shell --no-fish' or 'rihla shell --off' removes this file.
+set -g default-command \"exec '$fb' -C 'source $RIHLA_HOME/$FISH_RC_REL'\""
+	if [ "$(cat "$STATE/tmux-shell.conf" 2>/dev/null)" != "$c" ]; then
+		printf '%s\n' "$c" >"$STATE/tmux-shell.conf" || die "cannot write $STATE/tmux-shell.conf"
+		changed "tmux opens $fb (set in $STATE/tmux-shell.conf)"
+	fi
+	# ~/.tmux.conf from an older rihla does not read that file yet.
+	if j_owns "$HOME/.tmux.conf"; then
+		put_file "$HOME/.tmux.conf" "$(tmux_stub)"
+	elif ! grep -q 'tmux-shell.conf' "$HOME/.tmux.conf" 2>/dev/null; then
+		warn "$HOME/.tmux.conf is not rihla's; to get fish in tmux add: source-file '$STATE/tmux-shell.conf'"
+	fi
+	out=$(fish_probe)
+	on=$(printf '%s\n' "$out" | sed -n 's/^on //p')
+	skip=$(printf '%s\n' "$out" | sed -n 's/^skip //p')
+	if [ -n "$on" ]; then
+		ok "fish $("$fb" --version 2>/dev/null | ver_of) in tmux: $on"
+	else
+		warn "a test fish did not load rihla's fish layer ($RIHLA_HOME/$FISH_RC_REL)"
+	fi
+	shell_explain "$skip" | while IFS= read -r l; do say "  note  $l"; done
+	say "  New tmux windows and panes open fish. In a running tmux, Ctrl-Space r reloads the"
+	say "  config (windows already open keep their shell). Your login shell is unchanged."
+	say "  Back to your shell in tmux: rihla shell --no-fish"
+}
+
+fish_off() {
+	local d found=''
+	if [ -f "$STATE/tmux-shell.conf" ]; then
+		rm -f "$STATE/tmux-shell.conf"
+		changed "tmux opens your own shell again (new windows; Ctrl-Space r in a running tmux)"
+		found=1
+	fi
+	for d in "$TOOLS"/fish-*; do
+		[ -d "$d" ] && rm -rf "$d"
+	done
+	rm -f "$TOOLS/shell/bin/fish"
+	for d in "$XCONFIG/fish" "$XCACHE/fish"; do
+		if j_has tree "$d"; then
+			rm -rf "$d"
+			j_del tree "$d"
+		fi
+	done
+	[ -n "$found" ]
+}
+
+shell_off() {
+	local kind f d found=''
+	step "Shell layer off"
+	for kind in zsh bash; do
+		[ "$kind" = zsh ] && ! have zsh && [ ! -f "$HOME/.zshrc" ] && continue
+		f=$(rc_file_for "$kind")
+		rc_parts "$f" || continue
+		[ -n "$RC_LAYER" ] || continue
+		found=1
+		rc_write "$f" "$RC_PATH" ""
+	done
+	for f in $SHELL_TOOLS_ALL; do
+		for d in "$TOOLS/$f"-*; do
+			[ -d "$d" ] && rm -rf "$d"
+		done
+	done
+	fish_off && found=1
+	[ -d "$TOOLS/shell" ] && rm -rf "$TOOLS/shell" && changed "removed $TOOLS/shell"
+	rm -rf "$STATE/shell" "$STATE/shell-layer"
+	for f in "$XCACHE/blesh" "$XSTATE/blesh"; do
+		if j_has tree "$f"; then
+			rm -rf "$f"
+			j_del tree "$f"
+		fi
+	done
+	[ -n "$found" ] || ok "the layer was not on"
+}
+
+shell_status() {
+	local kind f out on skip fb
+	if [ -f "$STATE/tmux-shell.conf" ]; then
+		if fb=$(fish_bin); then
+			out=$(fish_probe)
+			say "fish in tmux: on ($fb, fish $("$fb" --version 2>/dev/null | ver_of))"
+			say "  on: $(printf '%s\n' "$out" | sed -n 's/^on //p')"
+			shell_explain "$(printf '%s\n' "$out" | sed -n 's/^skip //p')" | sed 's/^/  /'
+		else
+			say "fish in tmux: set, but no fish found (run: rihla shell --fish)"
+		fi
+	fi
+	kind=$(cat "$STATE/shell-layer" 2>/dev/null)
+	if [ -z "$kind" ]; then
+		say "shell layer: off. 'rihla shell' adds a prompt, autosuggestions, syntax highlighting,"
+		say "fzf keys, rgi/ff and zoxide to $(basename "${SHELL:-sh}"), skipping what you already have;"
+		say "'rihla shell --fish' also makes rihla's tmux open fish."
+		return 0
+	fi
+	f=$(rc_file_for "$kind")
+	rc_parts "$f"
+	if [ "$RC_LAYER" != "$kind" ]; then
+		say "shell layer: files installed for $kind, but the line is missing from $f (run: rihla shell)"
+		return 1
+	fi
+	out=$(shell_probe "$kind")
+	on=$(printf '%s\n' "$out" | sed -n 's/^on //p')
+	skip=$(printf '%s\n' "$out" | sed -n 's/^skip //p')
+	case $skip in *blesh:needs-a-terminal*) on="$on blesh" ;; esac
+	say "shell layer: on for $kind (line in $f)"
+	say "  on: ${on:-nothing}"
+	shell_explain "$skip" | sed 's/^/  /'
+}
+
+cmd_shell() {
+	local action=on kind='' k fish=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		on | --on) action=on ;;
+		--fish) fish=1 ;;
+		--no-fish) action=nofish ;;
+		off | --off) action=off ;;
+		status | --status) action=status ;;
+		--for)
+			kind=${2:-}
+			shift
+			;;
+		--for=*) kind=${1#--for=} ;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*) die "usage: rihla shell [--fish|--no-fish|--off|status] [--for zsh|bash]" ;;
+		esac
+		shift
+	done
+	detect_platform
+	[ -f "$JOURNAL" ] || die "rihla is not installed in $HOME; run the installer first"
+	case $action in
+	status)
+		shell_status
+		return
+		;;
+	off)
+		lock_or_die
+		shell_off
+		;;
+	nofish)
+		lock_or_die
+		step "fish in rihla's tmux: off"
+		fish_off || ok "tmux was not opening fish"
+		;;
+	on)
+		if [ -n "$fish" ]; then
+			lock_or_die
+			# The layer for your login shell too, when it is zsh or bash.
+			if k=$(shell_kind "$kind"); then shell_on "$k"; fi
+			fish_on
+			return
+		fi
+		k=$(shell_kind "$kind") || die "the shell layer is for zsh and bash; your shell is ${SHELL:-unknown} (choose one: rihla shell --for zsh; or rihla shell --fish for fish in tmux)"
+		lock_or_die
+		shell_on "$k"
+		;;
+	esac
+}
+
+# --------------------------------------------------------------------------- check
+
+D_FAIL=0
+d_line() { # d_line STATUS LABEL [HINT]
+	local tag
+	case $1 in
+	ok) tag="${C_G}[ ok ]${C_0}" ;;
+	warn) tag="${C_Y}[warn]${C_0}" ;;
+	fail)
+		tag="${C_R}[FAIL]${C_0}"
+		D_FAIL=$((D_FAIL + 1))
+		;;
+	*) tag="[info]" ;;
+	esac
+	printf '%s %s\n' "$tag" "$2"
+	[ -n "${3:-}" ] && printf '       fix: %s\n' "$3"
+	return 0
+}
+
+d_tool() { # d_tool NAME REQUIRED(1/0) HINT
+	local t="$1" p v floor src
+	p=$(command -v "$t" 2>/dev/null)
+	if [ -z "$p" ] && [ -x "$TOOLS/bin/$t" ]; then p=$TOOLS/bin/$t; fi
+	if [ -z "$p" ]; then
+		if [ "$2" = 1 ]; then d_line fail "$t: not found" "$3"; else d_line warn "$t: not found (optional)" "$3"; fi
+		return
+	fi
+	v=$(tool_version "$t" "$p")
+	src=system
+	case $(resolve_path "$p") in "$TOOLS"/*) src=rihla ;; esac
+	floor=$(floor_of "$t")
+	if [ -n "$floor" ] && [ -n "$v" ] && ! ver_ge "$v" "$floor"; then
+		d_line warn "$t $v ($src, $p): older than $floor" "$3"
+	else
+		d_line ok "$t ${v:-?} ($src, $p)"
+	fi
+}
+
+# What makes your own zsh slow to start or to suggest, one line each with what to change.
+# rihla never edits your config. Measured with your own rc files; the test shells write
+# no history.
+zsh_advice() {
+	local ms t n out omz plugins strat hs hf p10k zd f lines prog
+	ms=
+	for _ in 1 2 3; do
+		t=$(zsh -fc 'zmodload zsh/datetime; s=$EPOCHREALTIME; zsh -i -c "unset HISTFILE; exit" </dev/null >/dev/null 2>&1; print -r -- $(( (EPOCHREALTIME - s) * 1000 ))' 2>/dev/null)
+		ms="$ms ${t%%.*}"
+	done
+	n=$(printf '%s\n' $ms | sort -n | sed -n 2p)
+	[ -n "$n" ] || return 0
+	# shellcheck disable=SC2016
+	out=$(zsh -i -c 'print -r -- "@@omz ${ZSH:-}|${#plugins}"; print -r -- "@@strat ${ZSH_AUTOSUGGEST_STRATEGY[*]:-}|${+functions[_zsh_autosuggest_start]}|${+ZSH_AUTOSUGGEST_USE_ASYNC}"; print -r -- "@@hist ${HISTSIZE:-}|${HISTFILE:-}"; print -r -- "@@p10k ${+functions[p10k]}"; unset HISTFILE' </dev/null 2>/dev/null)
+	omz=$(printf '%s\n' "$out" | sed -n 's/^@@omz //p')
+	strat=$(printf '%s\n' "$out" | sed -n 's/^@@strat //p')
+	hs=$(printf '%s\n' "$out" | sed -n 's/^@@hist //p')
+	p10k=$(printf '%s\n' "$out" | sed -n 's/^@@p10k //p')
+	if [ "$n" -gt 200 ]; then
+		d_line warn "zsh starts in $n ms with your config (a terminal or tmux pane waits that long for its prompt)" "the lines below say what costs time; 'zsh -i -c zprof' after 'zmodload zsh/zprof' at the top of .zshenv lists the rest"
+	else
+		d_line info "zsh starts in $n ms with your config"
+	fi
+	plugins=${omz#*|}
+	[ -n "${omz%%|*}" ] && [ "${plugins:-0}" -gt 0 ] &&
+		d_line info "oh-my-zsh loads its library and $plugins plugin(s) at every start" "keep only the plugins you use in plugins=(...)"
+	case $strat in
+	*completion*'|1|'*) d_line warn "zsh-autosuggestions asks zsh's completion when history has no match (strategy: ${strat%%|*}): slow on every key, slower on NFS" "ZSH_AUTOSUGGEST_STRATEGY=(history) before the plugin loads" ;;
+	esac
+	hf=${hs#*|}
+	if [ -n "$hf" ] && [ -f "$hf" ]; then
+		lines=$(wc -l <"$hf" | tr -d ' ')
+		[ "${lines:-0}" -gt 100000 ] && d_line info "your history file has $lines lines (HISTSIZE=${hs%%|*}); a suggestion for something new searches all of them" "a smaller HISTSIZE and setopt hist_ignore_all_dups keep the search short"
+	fi
+	zd=$(zdotdir)
+	if [ "$p10k" = 1 ] && ! grep -qs 'p10k-instant-prompt' "$zd/.zshrc" "$zd/.zshenv" "$HOME/.zshrc"; then
+		d_line info "powerlevel10k without its instant prompt: the prompt waits for the whole config" "run 'p10k configure' and answer yes to instant prompt"
+	fi
+	# Pictures and system summaries printed at every start (HyDE does this).
+	for f in "$HOME/.zshenv" "$zd/.zshenv" "$zd/.zshrc" "$zd"/conf.d/*.zsh "$zd"/*.zsh; do
+		[ -f "$f" ] || continue
+		[ "$f" = "$zd/.zshenv" ] && [ "$zd" = "$HOME" ] && continue
+		lines=
+		for prog in pokego pokemon-colorscripts fastfetch neofetch screenfetch; do
+			have "$prog" && grep -v '^[[:space:]]*#' "$f" | grep -q "$prog" && lines="$lines${lines:+ or }$prog"
+		done
+		[ -n "$lines" ] && d_line info "$(basename "$f") runs $lines at every zsh start, also in each tmux pane" "run it only in a login shell ([[ -o login ]]), or not at all"
+	done
+}
+
+mask_proxy() { printf '%s' "$1" | sed 's#//[^/@]*@#//***@#'; }
+
+cmd_check() {
+	local v p tv log tsv
+	detect_platform
+	say "rihla check ($(cat "$RIHLA_HOME/VERSION" 2>/dev/null), $RIHLA_HOME)"
+	d_line info "platform: $(platform_label)"
+
+	case ":$PATH:" in
+	*":$BIN:"*) d_line ok "$BIN is on PATH" ;;
+	*) d_line warn "$BIN is not on PATH" "open a new shell, or add: export PATH=\"$(bin_for_rc):\$PATH\"" ;;
+	esac
+
+	p=$(command -v nvim 2>/dev/null)
+	[ -z "$p" ] && [ -x "$BIN/nvim" ] && p=$BIN/nvim
+	if [ -z "$p" ]; then
+		d_line fail "nvim: not found" "run: sh $RIHLA_HOME/install.sh"
+	else
+		v=$("$p" --version 2>/dev/null | ver_of)
+		if [ -z "$v" ]; then
+			d_line fail "nvim ($p) does not start" "glibc too old or wrong build? run: rihla install"
+		elif ! ver_ge "$v" 0.11; then
+			d_line fail "nvim $v ($p) is older than 0.11" "put $BIN before other directories in PATH"
+		else
+			d_line ok "nvim $v ($p)"
+		fi
+	fi
+
+	if have tmux; then
+		tv=$(tool_version tmux "$(command -v tmux)")
+		if ver_ge "${tv:-0}" 3.2; then
+			d_line ok "tmux $tv ($(command -v tmux))"
+		elif ver_ge "${tv:-0}" 2.6; then
+			d_line warn "tmux $tv: works, but popups and the menu need 3.2" "run 'rihla install' (brings tmux $(pinned_version tmux) on Linux) or upgrade tmux"
+		else
+			d_line warn "tmux $tv: very old, the config loads only basic settings" "run 'rihla install' or upgrade tmux"
+		fi
+	else
+		d_line warn "tmux: not found" "run 'rihla install' (Linux) or install tmux (macOS: brew install tmux)"
+	fi
+
+	if have git; then
+		v=$(git --version | ver_of)
+		if ver_ge "$v" "$(floor_of git)"; then
+			d_line ok "git $v"
+		else
+			d_line warn "git $v: older than $(floor_of git); plugins come as tarballs and :Lazy update is off" "use 'rihla update' to update plugins, or install a newer git"
+		fi
+	else
+		d_line warn "git: not found; plugins come as tarballs, gitsigns/lazygit have nothing to work with" "install git if you can"
+	fi
+	d_tool rg 1 "run: rihla install"
+	d_tool fd 1 "run: rihla install"
+	d_tool fzf 1 "run: rihla install"
+	d_tool lazygit 0 "run: rihla install (without --minimal)"
+	if have node; then d_line ok "node $(node --version 2>/dev/null)"; else d_line warn "node: not found (optional; a few language servers need it)" "install Node.js from nodejs.org or your package manager"; fi
+	if have cc || have gcc || have clang; then
+		d_line ok "C compiler: $(command -v cc || command -v gcc || command -v clang)"
+	else
+		d_line warn "C compiler: not found (optional; tree-sitter parsers cannot be compiled)" "install gcc or clang (Xcode command line tools on macOS)"
+	fi
+	if have unzip; then
+		d_line ok "unzip (the editor's tool installer unpacks stylua, clangd and others with it)"
+	else
+		d_line warn "unzip: not found; stylua (Lua formatting), clangd and other zip-packaged tools cannot be installed by the editor" "install the unzip package (ask your administrator if you have no sudo)"
+	fi
+	if ! have python3; then
+		d_line info "python3: not found (optional; Python language servers, ruff and debugpy need it; lessons 10 and 13 use Python files)"
+	elif python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+		d_line ok "python3 $(python3 --version 2>&1 | ver_of) with venv (Python language servers and debugpy can be installed)"
+	else
+		d_line warn "python3 has no venv/ensurepip: Python language servers, ruff and debugpy cannot be installed (lessons 10 and 13 use Python)" "Debian/Ubuntu: install python3-venv (ask your administrator if you have no sudo)"
+	fi
+	if have ps; then d_line ok "ps (tmux uses it to see whether a pane runs nvim for Ctrl-h/j/k/l)"; else d_line info "ps: not found; tmux uses the pane's foreground command to spot nvim for Ctrl-h/j/k/l (misses nvim run from git commit; procps fixes that)"; fi
+
+	if [ -n "${WAYLAND_DISPLAY:-}" ] && have wl-copy; then
+		d_line ok "clipboard: wl-copy"
+	elif [ -n "${DISPLAY:-}" ] && { have xclip || have xsel; }; then
+		d_line ok "clipboard: $(command -v xclip || command -v xsel)"
+	elif have pbcopy; then
+		d_line ok "clipboard: pbcopy"
+	else
+		d_line info "clipboard: OSC 52 only (works over SSH if your terminal allows it: kitty, WezTerm, iTerm2, Windows Terminal, recent Alacritty/foot)"
+	fi
+
+	case ${COLORTERM:-} in
+	truecolor | 24bit) d_line ok "true colour (COLORTERM=$COLORTERM)" ;;
+	*)
+		if [ -n "${TMUX:-}" ]; then
+			d_line info "true colour: inside tmux; COLORTERM not passed through (the tmux config enables RGB)"
+		else
+			d_line warn "true colour: COLORTERM is '${COLORTERM:-}' (TERM=${TERM:-})" "use a true-colour terminal; over SSH add 'SendEnv COLORTERM' or export COLORTERM=truecolor"
+		fi
+		;;
+	esac
+	if [ "$(icons_mode)" = nerd ]; then
+		if nerd_font_present; then d_line ok "icons: nerd (a Nerd Font is installed here)"; else d_line info "icons: nerd (no Nerd Font found on this machine; fine if your terminal on the other end of SSH has one)"; fi
+	else
+		d_line ok "icons: ascii (if your terminal font is a Nerd Font: rihla icons nerd)"
+	fi
+	if [ -n "${https_proxy:-}${http_proxy:-}" ]; then
+		d_line info "proxy: https_proxy=$(mask_proxy "${https_proxy:-}") http_proxy=$(mask_proxy "${http_proxy:-}") no_proxy=${no_proxy:-}"
+	else
+		d_line info "proxy: none set"
+	fi
+	d_line info "plugin fetch mode: $(plugin_mode)"
+	for v in tmux-256color xterm-kitty; do
+		p=$(printf '%s' "$v" | cut -c1)
+		if [ -f "$HOME/.terminfo/$p/$v" ] && j_has file "$HOME/.terminfo/$p/$v"; then
+			d_line ok "terminfo $v: rihla's copy in ~/.terminfo (the system has none)"
+		elif terminfo_has "$v"; then
+			d_line ok "terminfo $v"
+		elif [ "$v" = tmux-256color ]; then
+			d_line warn "terminfo tmux-256color: missing; tmux falls back to screen-256color (no italics)" "run: rihla install"
+		else
+			d_line info "terminfo xterm-kitty: missing (tmux refuses to start from kitty over SSH)" "run: rihla install"
+		fi
+	done
+	v=$(cat "$STATE/shell-layer" 2>/dev/null)
+	if [ -n "$v" ]; then
+		p=$(rc_file_for "$v")
+		rc_parts "$p"
+		if [ "$RC_LAYER" = "$v" ]; then
+			tv=$(shell_probe "$v" | sed -n -e 's/^on //p' -e 's/^skip .*blesh:needs-a-terminal.*/(ble.sh in a terminal)/p' | tr '\n' ' ')
+			d_line ok "shell layer for $v: ${tv:-loads nothing new here} (rihla shell status: details)"
+		else
+			d_line warn "shell layer for $v: files installed but the line is missing from $p" "run: rihla shell"
+		fi
+	else
+		d_line info "shell layer: off (rihla shell adds a prompt, autosuggestions, highlighting, fzf keys, rgi/ff, zoxide)"
+	fi
+	if [ -f "$STATE/tmux-shell.conf" ]; then
+		if p=$(fish_bin); then
+			d_line ok "fish in tmux: $p (fish $("$p" --version 2>/dev/null | ver_of))"
+		else
+			d_line warn "fish in tmux: set, but no fish found" "run: rihla shell --fish"
+		fi
+	fi
+	[ "$(basename "${SHELL:-}")" = zsh ] && have zsh && zsh_advice
+
+	if [ -x "$TOOLS/bin/nvim" ] && [ -f "$RIHLA_HOME/nvim/lazy-lock.json" ]; then
+		NVIM_BIN=$TOOLS/bin/nvim
+		tsv=$(mktemp "${TMPDIR:-/tmp}/rihla-check.XXXXXX") log=$tsv.log
+		if run_provision check "$tsv" "$log"; then
+			d_line ok "plugins: $(grep -c '^ok' "$tsv") at lockfile commits"
+		else
+			d_line fail "plugins: $(grep -c '^FAIL' "$tsv") problem(s): $(grep '^FAIL' "$tsv" | cut -f2 | tr '\n' ' ')" "run: rihla install"
+		fi
+		rm -f "$tsv" "$log"
+	fi
+	say ""
+	if [ "$D_FAIL" -eq 0 ]; then
+		say "Everything rihla needs works here. [warn] lines are optional extras; each says what it adds."
+	else
+		say "$D_FAIL thing(s) above need fixing: see the 'fix:' line under each [FAIL]."
+	fi
+	[ "$D_FAIL" -eq 0 ]
+}
+
+# --------------------------------------------------------------------------- bundle
+
+cmd_bundle() {
+	local out='' tos tarch tglibc stage b tool rows row tsv log sandbox name url dir commit branch n=0 old_ifs
+	detect_platform
+	tos=$OS tarch=$ARCH tglibc=2.17
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--os)
+			tos=$2
+			shift
+			;;
+		--arch)
+			tarch=$2
+			shift
+			;;
+		--glibc)
+			tglibc=$2
+			shift
+			;;
+		-o | --output)
+			out=$2
+			shift
+			;;
+		*) die "bundle: unknown option $1" ;;
+		esac
+		shift
+	done
+	[ "$tos" = linux ] || tglibc=
+	[ -n "$out" ] || out=$PWD/rihla-bundle-$tos-$tarch.tar.gz
+	stage=$(mktemp -d "${TMPDIR:-/tmp}/rihla-bundle.XXXXXX") || die "mktemp failed"
+	b=$stage/rihla-bundle
+	mkdir -p "$b/downloads" "$b/plugins" "$b/rihla"
+	# Not installed here? Then leave nothing behind: tools and downloads stay in the stage.
+	if [ ! -f "$JOURNAL" ]; then
+		TOOLS=$stage/tools
+		[ -n "${RIHLA_CACHE:-}" ] || CACHE=$stage/cache
+	fi
+	step "Bundling for $tos $tarch${tglibc:+ (glibc >= $tglibc)}"
+
+	# From a git checkout, only what git would ship (no ignored or locally excluded files).
+	if [ -d "$RIHLA_HOME/.git" ] && have git && (cd "$RIHLA_HOME" && git -c safe.directory='*' rev-parse --is-inside-work-tree >/dev/null 2>&1); then
+		(cd "$RIHLA_HOME" && git -c safe.directory='*' ls-files -co --exclude-standard -z | xargs -0 tar -cf -)
+	else
+		(cd "$RIHLA_HOME" && tar -cf - --exclude=.git --exclude=.rihla-source .)
+	fi | (cd "$b/rihla" && tar -xf -) || die "cannot copy $RIHLA_HOME"
+
+	# Every pinned build usable on the target, so the offline install can pick one.
+	T_OS=$tos T_ARCH=$tarch T_GLIBC=$tglibc
+	for tool in nvim rg fd fzf lazygit tmux $SHELL_TOOLS_ALL; do
+		rows=$(asset_rows "$tool")
+		[ -n "$rows" ] || {
+			warn "$tool: no build for $tos $tarch"
+			continue
+		}
+		old_ifs=$IFS
+		IFS=$NL
+		for row in $rows; do
+			IFS=$old_ifs
+			# shellcheck disable=SC2086
+			set -- $row
+			f=$(fetch_asset "$9" "$8") || die "download failed: $9"
+			cp "$f" "$b/downloads/" && ok "$tool $3: $(basename "$f")"
+		done
+		IFS=$old_ifs
+	done
+
+	# Plugin list from the config itself, in a sandbox so the user's own setup and
+	# plugins do not leak into the bundle.
+	T_OS=$OS T_ARCH=$ARCH T_GLIBC=$GLIBC
+	sandbox=$stage/sandbox
+	mkdir -p "$sandbox/config" "$sandbox/data" "$sandbox/state" "$sandbox/cache"
+	ln -s "$RIHLA_HOME/nvim" "$sandbox/config/nvim"
+	(
+		XDG_STATE_HOME=$sandbox/state
+		export XDG_STATE_HOME
+		install_tool nvim >/dev/null
+	) || die "need a runnable nvim on this machine to read the plugin list"
+	NVIM_BIN=$TOOLS/bin/nvim
+	(
+		XDG_CONFIG_HOME=$sandbox/config XDG_DATA_HOME=$sandbox/data
+		XDG_STATE_HOME=$sandbox/state XDG_CACHE_HOME=$sandbox/cache
+		export XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
+		LAZY_DIR=$sandbox/data/nvim/lazy/lazy.nvim
+		CACHE_ROOT=$b
+		OFFLINE_DIR=
+		mkdir -p "$b/plugins"
+		seed_lazy tarball >/dev/null || exit 1
+		tsv=$stage/plugins.tsv log=$stage/provision.log
+		run_provision list "$tsv" "$log" || {
+			show_provision_failure "$tsv" "$log"
+			exit 1
+		}
+		while IFS="$TAB" read -r name url dir commit branch; do
+			[ "$name" = lazy.nvim ] && continue
+			seed_tarball "$url" "$commit" "$branch" "$sandbox/data/nvim/lazy/$name" || exit 1
+			n=$((n + 1))
+		done <"$tsv"
+		ok "$n plugins + lazy.nvim at lockfile commits"
+	) || die "could not collect plugins"
+	{
+		echo "rihla $(cat "$RIHLA_HOME/VERSION" 2>/dev/null)"
+		echo "target $tos $tarch ${tglibc:+glibc>=$tglibc}"
+		echo "created $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	} >"$b/BUNDLE"
+	(cd "$stage" && tar -cf - rihla-bundle) | gzip -c >"$out" || die "cannot write $out"
+	rm -rf "$stage"
+	say "Wrote $out ($(du -h "$out" | cut -f1)). On the offline machine:"
+	say "  tar -xzf $(basename "$out") rihla-bundle/rihla/install.sh && sh rihla-bundle/rihla/install.sh --offline $(basename "$out")"
+}
+
+# --------------------------------------------------------------------------- small commands
+
+cmd_icons() {
+	local m t a
+	case ${1:-} in
+	'') icons_mode ;;
+	nerd | ascii)
+		mkdir -p "$USERCFG" && printf '%s\n' "$1" >"$USERCFG/icons"
+		say "icons: $1. Restart nvim; in tmux run: tmux source-file ~/.tmux.conf"
+		;;
+	auto)
+		detect_platform
+		m=
+		if nerd_font_present; then
+			m=nerd
+			say "A Nerd Font is installed on this machine."
+		fi
+		if [ -z "$m" ]; then
+			t=$(terminal_name 2>/dev/null)
+			[ -n "$t" ] && say "Your terminal says it is: $t"
+			m=$(terminal_icons 2>/dev/null)
+			[ "$m" = nerd ] && say "It draws Nerd Font symbols with any font."
+		fi
+		if [ -z "$m" ]; then
+			[ -t 0 ] && [ -t 1 ] || die "cannot tell from here; run 'rihla icons auto' in your terminal, or choose: rihla icons nerd|ascii"
+			# Nerd Font code points for a terminal, a git branch, a folder and a house.
+			printf 'Look at these four symbols:   %s   %s   %s   %s\n' "$(printf '\357\204\240')" \
+				"$(printf '\356\202\240')" "$(printf '\357\201\273')" "$(printf '\357\200\225')"
+			printf 'Do you see a terminal, a branch, a folder and a home icon (y), or boxes / question marks (n)? [y/N] '
+			read -r a
+			case $a in [yY]*) m=nerd ;; *) m=ascii ;; esac
+		fi
+		cmd_icons "$m"
+		;;
+	*) die "usage: rihla icons [nerd|ascii|auto]" ;;
+	esac
+}
+
+cmd_cheat() {
+	local files='' f
+	case ${1:-all} in
+	nvim) files=$RIHLA_HOME/docs/cheatsheet-nvim.md ;;
+	tmux) files=$RIHLA_HOME/docs/cheatsheet-tmux.md ;;
+	all) files="$RIHLA_HOME/docs/cheatsheet-nvim.md $RIHLA_HOME/docs/cheatsheet-tmux.md" ;;
+	*) die "usage: rihla cheat [nvim|tmux]" ;;
+	esac
+	for f in $files; do [ -f "$f" ] || warn "missing $f"; done
+	# shellcheck disable=SC2086
+	if [ -t 1 ] && [ -z "${PAGER:-}" ] && have less; then
+		cat $files 2>/dev/null | less -R -Ps'rihla cheat sheets   q closes, arrows or j and k scroll, / searches'
+	elif [ -t 1 ] && [ -n "${PAGER:-}" ] && have "$PAGER"; then
+		cat $files 2>/dev/null | $PAGER
+	else
+		cat $files 2>/dev/null
+	fi
+}
+
+cmd_learn() {
+	# The lessons live in nvim (:Rihla learn keeps track of where you are).
+	local nv="$BIN"/nvim
+	[ -x "$nv" ] || nv=$(command -v nvim 2>/dev/null)
+	case ${1:-} in
+	'' | next | prev | done | reset | [0-9] | [0-9][0-9] | [0-9][a-z] | [0-9][0-9][a-z] | list) ;;
+	*) die "usage: rihla learn [next|prev|done|list|reset|NUMBER (e.g. 7b)]" ;;
+	esac
+	if [ -n "$nv" ] && [ -f "$RIHLA_HOME/nvim/lua/rihla/learn.lua" ]; then
+		case ${1:-} in
+		list) exec "$nv" --headless "+Rihla learn print" +qa ;; # printed here; nothing to quit
+		done) exec "$nv" --headless "+Rihla learn done" +qa ;;
+		esac
+		exec "$nv" "+Rihla learn $*"
+	fi
+	say "Lessons are in $RIHLA_HOME/docs/learn (start with 00-start-here.md)."
+}
+
+# What to do first. The installer ends with this, and `rihla` alone prints it.
+start_here() {
+	local onpath=1
+	case ":$PATH:" in *":$BIN:"*) ;; *) onpath= ;; esac
+	say "${C_B}Start here${C_0}"
+	if [ -z "$onpath" ]; then
+		say "  1. Open a new terminal window (this one does not know the new commands yet)."
+		say "     Or, in this one, paste:  export PATH=\"$(bin_for_rc):\$PATH\""
+		say "  2. Type  rihla learn  and press Enter. The first lesson says how to quit."
+	else
+		say "  Type  rihla learn  and press Enter. The first lesson says how to quit."
+	fi
+	say "  Later: nvim opens the editor, rihla check says what works on this machine,"
+	say "  rihla help lists every command."
+	if [ ! -f "$STATE/shell-layer" ]; then
+		case $(basename "${SHELL:-sh}") in
+		zsh | bash)
+			say "  Optional: rihla shell  gives this shell a prompt, autosuggestions, syntax"
+			say "  highlighting, fzf keys and zoxide (anything you already have is left alone)."
+			;;
+		esac
+	fi
+}
+
+cmd_version() {
+	local t
+	detect_platform
+	say "rihla $(cat "$RIHLA_HOME/VERSION" 2>/dev/null)$([ -d "$RIHLA_HOME/.git" ] && have git && printf ' (%s)' "$(cd "$RIHLA_HOME" && git rev-parse --short HEAD 2>/dev/null)")"
+	say "home: $RIHLA_HOME"
+	for t in nvim rg fd fzf lazygit tmux $SHELL_TOOLS_ALL; do say "pinned $t $(pinned_version "$t")"; done
+}
+
+usage() {
+	cat <<EOF
+rihla: a portable Neovim + tmux setup, installed into your home directory without root.
+
+Usage: rihla <command> [options]
+
+  install [--icons nerd|ascii] [--no-shell] [--shell] [--minimal] [--no-plugins]
+                     install or repair; safe to re-run (a second run changes nothing);
+                     --shell also turns on the shell layer (see rihla shell)
+  shell [--fish|--no-fish|--off|status] [--for zsh|bash]
+                     prompt, autosuggestions, syntax highlighting, fzf keys, rgi/ff and
+                     zoxide for your shell, pinned like the rest; skips what you already
+                     have. --fish: rihla's tmux opens fish (your login shell stays)
+  update [--offline BUNDLE]
+                     move to the latest rihla (or the one in BUNDLE), its tools and plugins
+  uninstall          remove everything rihla installed and restore the backed-up config
+  check              check versions, PATH, clipboard, colours, icons, proxy, plugins
+  bundle [--os linux|darwin] [--arch x86_64|arm64] [--glibc 2.17] [-o FILE]
+                     build a single tarball for installing on a machine with no network
+  icons [nerd|ascii|auto]
+                     show or set the icon mode (Nerd Font glyphs or plain text); auto
+                     asks your terminal (works over SSH) or shows you sample glyphs
+  cheat [nvim|tmux]  show the cheat sheets
+  learn [next|prev|done|list|reset|N]
+                     open your current lesson in nvim (list prints them here)
+  version            print rihla's version and the pinned tool versions
+
+Paths: rihla in $RIHLA_HOME, tools in $TOOLS, commands in $BIN,
+your overrides in $USERCFG.
+EOF
+}
+
+main() {
+	local cmd="${1:-start}"
+	[ $# -gt 0 ] && shift
+	case $cmd in
+	install) cmd_install "$@" ;;
+	update) cmd_update "$@" ;;
+	uninstall) cmd_uninstall "$@" ;;
+	check) cmd_check "$@" ;;
+	shell) cmd_shell "$@" ;;
+	bundle) cmd_bundle "$@" ;;
+	icons) cmd_icons "$@" ;;
+	cheat) cmd_cheat "$@" ;;
+	learn) cmd_learn "$@" ;;
+	version | --version | -V) cmd_version ;;
+	start) start_here ;;
+	help | -h | --help) usage ;;
+	*)
+		usage >&2
+		exit 2
+		;;
+	esac
+}
+
+main "$@"
+exit $?

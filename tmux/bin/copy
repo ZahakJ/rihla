@@ -1,0 +1,16 @@
+#!/bin/sh
+# Copy-mode `y` pipes the selection here. tmux has already sent it to the terminal with
+# OSC 52 (set-clipboard on), which is what works over SSH. This also hands it to a local
+# clipboard tool when one is reachable, for terminals that ignore OSC 52.
+if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
+	exec wl-copy
+elif [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null 2>&1; then
+	exec xclip -selection clipboard -in >/dev/null 2>&1
+elif [ -n "${DISPLAY:-}" ] && command -v xsel >/dev/null 2>&1; then
+	exec xsel --clipboard --input
+elif command -v pbcopy >/dev/null 2>&1; then
+	exec pbcopy
+elif command -v clip.exe >/dev/null 2>&1; then
+	exec clip.exe
+fi
+cat >/dev/null

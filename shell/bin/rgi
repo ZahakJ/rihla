@@ -1,0 +1,47 @@
+#!/bin/sh
+# rgi [PATTERN [rg options and paths...]]: search inside files as you type. PATTERN and what
+# you type are regular expressions (ripgrep: smart case, hidden files, .git, node_modules
+# and the like left out, see shell/ripgreprc). The file around each hit shows beside the
+# list. Enter opens the hit in nvim at its line and column; Ctrl-Q opens nvim with every
+# hit in the quickfix list (]q and [q step through them). Examples:
+#   rgi                       start empty and type
+#   rgi 'def \w+_test' src    only under src/
+#   rgi TODO -g '*.py'        only Python files (-t py works too)
+here=$(cd "$(dirname "$0")" && pwd -P)
+for c in rg fzf; do
+	command -v "$c" >/dev/null 2>&1 || {
+		echo "rgi: needs $c (rihla install brings it)" >&2
+		exit 1
+	}
+done
+if [ -z "${RIPGREP_CONFIG_PATH:-}" ] && [ -r "$here/../ripgreprc" ]; then
+	RIPGREP_CONFIG_PATH=$here/../ripgreprc
+	export RIPGREP_CONFIG_PATH
+fi
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+query=${1:-}
+[ $# -gt 0 ] && shift
+rest=
+for a in "$@"; do rest="$rest $(q "$a")"; done
+ed="vi"
+for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
+# Ctrl-Q: the hits as the quickfix list, read once the editor is up (not with -q, which
+# reads them before plugins load), the list open below, the cursor on the first hit.
+qf="+'cfile {+f}' +copen '+wincmd p'"
+[ "$ed" = vi ] && qf="-q {+f}"
+# Enter: the hit's line and column (rg --column counts bytes from 1, as cursor() does);
+# fzf quotes the fields, +0 makes them numbers. Plain vi takes the line only.
+at="'+call cursor({2}+0,{3}+0)'"
+[ "$ed" = vi ] && at="+{2}"
+# fzf runs these with $SHELL; they are sh. The editor gets your shell back.
+sh_back="SHELL=$(q "${SHELL:-/bin/sh}")"
+rg="rg --column --line-number --no-heading --color=always --colors=path:fg:blue --colors=line:fg:white --colors=column:fg:white --colors=match:fg:red --colors=match:style:bold"
+# </dev/null: with no path given, rg would otherwise read fzf's pipe.
+search="[ -n {q} ] && $rg -- {q}$rest </dev/null || true"
+SHELL=/bin/sh exec fzf --ansi --disabled --multi --query "$query" --prompt 'rg> ' --delimiter : \
+	--height=100% --header 'Enter: open   Ctrl-Q: all to quickfix   Esc: quit' \
+	--bind "start:reload:$search" --bind "change:reload:sleep 0.05; $search" \
+	--preview "sh $(q "$here/preview") {1} {2}" \
+	--preview-window 'right,50%,border-left,<100(down,55%,border-top)' \
+	--bind "enter:become([ -n {1} ] && $sh_back exec $ed {1} $at)" \
+	--bind "ctrl-q:select-all+become($sh_back exec $ed $qf)"

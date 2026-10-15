@@ -1,0 +1,12 @@
+#!/bin/sh
+# Prints the icon mode: nerd or ascii. Same rule as nvim: $RIHLA_ICONS, else the one-word
+# file ~/.config/rihla/icons, else ascii (plain text never renders as boxes).
+m=${RIHLA_ICONS:-}
+f=${RIHLA_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/rihla}/icons
+if [ -z "$m" ] && [ -f "$f" ]; then
+	m=$(sed -n '1p' "$f" | tr -d ' \t\r')
+fi
+case $m in
+nerd) echo nerd ;;
+*) echo ascii ;;
+esac
