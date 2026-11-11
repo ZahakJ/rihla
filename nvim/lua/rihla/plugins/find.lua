@@ -34,6 +34,13 @@ local spec = {
       return vim.ui.select(...)
     end
     M._select_stub = vim.ui.select
+    -- :Grep and :Find [scope] [-- query], e.g. :Grep ~/src .py !tests/ -- TODO
+    vim.api.nvim_create_user_command("Grep", function(a)
+      M.command("grep", a.args)
+    end, { nargs = "*", complete = "dir", desc = "Live grep; [folders .ext globs !excludes -t type] [-- query]" })
+    vim.api.nvim_create_user_command("Find", function(a)
+      M.command("files", a.args)
+    end, { nargs = "*", complete = "dir", desc = "Find a file; [folders .ext globs !excludes] [-- name]" })
   end,
   keys = {
     { "<leader><leader>", function() require("rihla.cmdpalette").open() end, desc = "Command palette (actions + keys)" },
@@ -41,7 +48,8 @@ local spec = {
     { "<leader>ff", function() M.files() end, desc = "Find file by name (recent first)" },
     { "<leader>fg", function() M.grep() end, desc = "Grep text in project (regex, live)" },
     { "<C-S-f>", function() M.grep() end, desc = "Grep text in project (VS Code Ctrl+Shift+F)" },
-    { "<leader>fG", function() M.grep_scoped() end, desc = "Grep in a folder / glob (asks where)" },
+    { "<leader>fG", function() M.grep_scoped() end, desc = "Grep, asking where: folders (~ /), .ext, globs, !excludes" },
+    { "<leader>fF", function() M.files_scoped() end, desc = "Find file, asking where: folders (~ /), .ext, !excludes" },
     { "<leader>fw", function() M.grep_word() end, mode = { "n", "x" }, desc = "Grep word under cursor / selection" },
     { "<leader>fb", pick("buffers", { title = "Open files" }), desc = "Open buffers (files)" },
     { "<leader>bb", pick("buffers", { title = "Open files" }), desc = "Pick an open buffer (VS Code Ctrl+Tab)" },
@@ -55,7 +63,7 @@ local spec = {
     { "<leader>fS", pick("lsp_workspace_symbols"), desc = "Symbols in workspace (VS Code Ctrl+T)" },
     { "<leader>cs", function() M.symbols() end, desc = "Outline: symbols of this file, side panel" },
     { "<leader>fd", pick("diagnostics"), desc = "Diagnostics (problems panel)" },
-    { "<leader>fR", pick("resume"), desc = "Resume last search" },
+    { "<leader>fR", pick("resume"), desc = "Resume last search (query, filters, toggles)" },
     { "<leader>fq", pick("qflist"), desc = "Quickfix list (picker)" },
     { "<leader>fm", pick("marks"), desc = "Marks" },
     { '<leader>f"', pick("registers"), desc = "Registers" },
