@@ -2,30 +2,95 @@
 # ff [PATTERN [PATH...]] (also fdi): find a file by name and open it in nvim. PATTERN is a
 # regular expression on the name (fd); then type to narrow the list (fuzzy). Hidden files
 # are listed; .git, node_modules and the like are not (shell/fdignore). Tab marks several,
-# Enter opens the marked ones (or the one under the cursor). Examples:
+# Enter opens the marked ones (or the one under the cursor). Any folder works: in your
+# home or / hidden files start off, and / is searched as its local disks (no /proc, /sys,
+# /dev, /run, network mounts). fd options go before PATTERN. Examples:
 #   ff                    every file below here
 #   ff '\.py$' src        Python files under src/
+#   ff -e conf '' /etc    .conf files under /etc
+#   ff nginx /            a file named like nginx anywhere on this machine
 here=$(cd "$(dirname "$0")" && pwd -P)
+q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+ed="vi"
+for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
+
+# Enter: the marked files in the editor; in rihla's tmux popup (RIHLA_OPEN=window) the
+# editor gets a new tmux window.
+if [ "${1:-}" = --ff-open ]; then
+	list=$2
+	shift 2
+	SHELL=${FF_SHELL:-/bin/sh}
+	export SHELL
+	set -- "$ed"
+	while IFS= read -r f; do [ -n "$f" ] && set -- "$@" "$f"; done <"$list"
+	[ $# -gt 1 ] || exit 0
+	if [ "${RIHLA_OPEN:-}" = window ] && [ -n "${TMUX:-}" ]; then
+		exec tmux new-window -c "$PWD" "$@"
+	fi
+	exec "$@"
+fi
+
 command -v fzf >/dev/null 2>&1 || {
 	echo "ff: needs fzf (rihla install brings it)" >&2
 	exit 1
 }
-q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-ed="vi"
-for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
 fd=
 for c in fd fdfind; do command -v "$c" >/dev/null 2>&1 && fd=$c && break; done
+
+# The whole disk: its top folders and the local disks mounted below them.
+disk_roots() {
+	for d in /*; do
+		[ -d "$d" ] && [ ! -h "$d" ] || continue
+		case $d in /proc | /sys | /dev | /run | /lost+found) continue ;; esac
+		printf '%s\n' "$d"
+	done
+	[ -r /proc/self/mounts ] && awk '
+		$3 ~ /^(ext[234]|xfs|btrfs|zfs|f2fs|jfs|reiserfs|bcachefs|vfat|exfat|ntfs|ntfs3|fuseblk)$/ {
+			m = $2; gsub(/\\040/, " ", m)
+			if (m ~ /^\/[^\/]+\/./ && m !~ /^\/(proc|sys|dev|run)\//) print m
+		}' /proc/self/mounts
+}
+
+# Hidden files and symlinks start off in your home or on the whole disk.
+hidden=--hidden follow=--follow disk=
+for a in "$@"; do
+	case $a in / | "$HOME" | "$HOME/") hidden='' follow='' ;; esac
+	[ "$a" = / ] && disk=1
+done
+
 list() {
 	if [ -n "$fd" ]; then
-		"$fd" --type f --hidden --follow --ignore-file "$here/../fdignore" --color=never "$@" </dev/null
+		if [ -n "$disk" ]; then
+			# fd PATTERN / -> fd PATTERN <each local disk root> --one-file-system
+			first=1
+			for a in "$@"; do
+				if [ -n "$first" ]; then set --; first=; fi
+				if [ "$a" = / ]; then
+					while IFS= read -r d; do set -- "$@" "$d"; done <<EOF
+$(disk_roots)
+EOF
+				else
+					set -- "$@" "$a"
+				fi
+			done
+			set -- "$@" --one-file-system
+		fi
+		# shellcheck disable=SC2086 # empty or one word each
+		"$fd" --type f $hidden $follow --ignore-file "$here/../fdignore" --color=never "$@" </dev/null
 	else
 		# No fd: find, without the ignored names (no .gitignore then).
-		find "${2:-.}" \( -name .git -o -name node_modules -o -name .venv -o -name __pycache__ \) -prune -o -type f -print 2>/dev/null |
+		root=${2:-.}
+		x=
+		[ "$root" = / ] && x=-xdev
+		# shellcheck disable=SC2086
+		find "$root" $x \( -name .git -o -name node_modules -o -name .venv -o -name __pycache__ -o -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f -print 2>/dev/null |
 			sed 's|^\./||' | grep -E -- "${1:-.}"
 	fi
 }
+FF_SHELL=${SHELL:-/bin/sh}
+export FF_SHELL
 list "$@" | SHELL=/bin/sh fzf --multi --prompt 'file> ' \
 	--height=100% --header 'Enter: open   Tab: mark several   Esc: quit' \
 	--preview "sh $(q "$here/preview") {}" \
 	--preview-window 'right,55%,border-left,<100(down,50%,border-top)' \
-	--bind "enter:become(SHELL=$(q "${SHELL:-/bin/sh}") exec $ed {+})"
+	--bind "enter:become(sh $(q "$here/ff") --ff-open {+f})"

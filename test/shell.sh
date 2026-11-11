@@ -18,7 +18,10 @@
 # the shell starts with nothing but its prompt (rihla's starship prompt where the layer
 # says so) in under 300 ms, Ctrl-R is fzf; Ctrl-T and Alt-C list with fd and the shared
 # defaults (hidden files in, node_modules out), as do rg and fd themselves; rgi finds a
-# line and Enter opens nvim there, Ctrl-Q puts every hit in nvim's quickfix list; with
+# line and Enter opens nvim there, Ctrl-Q puts every hit in nvim's quickfix list, filters
+# typed after " -- " apply while the search stays, Ctrl-G refines and returns, Alt-H drops
+# hidden files, Tab-marked hits go to the quickfix list, RIHLA_OPEN=window (the tmux popup)
+# opens the hit in a new window, `rihla grep` starts it and prefix + / is bound; with
 # xz to unpack it, `rihla shell --fish` makes tmux open fish with suggestions, colours,
 # fzf and rgi, and --no-fish gives the shell back; an existing oh-my-zsh / powerlevel10k /
 # plugin setup (stub files) is detected and left alone; `rihla shell --off` removes it.
@@ -462,6 +465,95 @@ search_checks() {
 }
 nvim_running() { [ "$(t display -p -t "$1" '#{pane_current_command}' 2>/dev/null)" = nvim ]; }
 nvim_gone() { ! nvim_running "$1"; }
+two_windows() { [ "$(t list-windows -t "$1" 2>/dev/null | wc -l)" -ge 2 ]; }
+
+# rgi_checks: rgi as an IDE search, typed into a pane: filters after " -- " while the search
+# stays, Ctrl-G refines and comes back, Alt-H drops hidden files, Tab-marked hits go to the
+# quickfix list, and from rihla's tmux popup (RIHLA_OPEN=window) the hit opens in a new
+# window. Then the same search started as `rihla grep`.
+rgi_checks() {
+	mkdir -p "$W/p2/tests" "$W/p2/.hid"
+	for f in a.py b.lua tests/c.py .hid/d.py; do echo "x = 'zz_pow'" >"$W/p2/$f"; done
+	fresh_server
+	SHELL=$1 t -f "$HOME/.tmux.conf" new-session -d -s r -x 120 -y 30 -c "$W/p2" || return 1
+	wait_for pane_has r '[^[:space:]]'
+	sleep 1
+	t send-keys -t r C-u "rgi 'zz_pow -- .py !tests/'" Enter
+	shown=
+	if wait_for pane_has r 'a\.py:1'; then
+		sleep 0.5
+		pane_has r 'b\.lua' || pane_has r 'tests/c' || shown=1
+	fi
+	if [ -n "$shown" ] && pane_has r 'hid/d\.py'; then
+		result rgi-filters PASS "'zz_pow -- .py !tests/': Python files, tests/ left out, hidden file in"
+	else
+		result rgi-filters FAIL "$(t capture-pane -p -t r | grep -v '^$' | head -n 8 | tr '\n' '|')"
+	fi
+	t send-keys -t r C-g
+	wait_for pane_has r 'refine>'
+	t send-keys -t r 'd.py'
+	sleep 1
+	refined=
+	pane_has r 'hid/d\.py' && ! pane_has r 'a\.py:1' && refined=1
+	t send-keys -t r C-g
+	if [ -n "$refined" ] && wait_for pane_has r 'a\.py:1' && pane_has r 'zz_pow -- \.py'; then
+		result rgi-refine PASS "Ctrl-G filters the hits by typing; Ctrl-G again brings the search back"
+	else
+		result rgi-refine FAIL "$(t capture-pane -p -t r | grep -v '^$' | head -n 8 | tr '\n' '|')"
+	fi
+	t send-keys -t r M-h
+	sleep 1
+	if wait_for pane_has r '-hidden>' && ! pane_has r 'hid/d\.py' && pane_has r 'a\.py:1'; then
+		result rgi-hidden PASS "Alt-H leaves hidden files out; the prompt says -hidden"
+	else
+		result rgi-hidden FAIL "$(t capture-pane -p -t r | grep -v '^$' | head -n 8 | tr '\n' '|')"
+	fi
+	# Two marked hits (Tab), Enter: nvim with those two in the quickfix list.
+	rm -f "$W/qf2.out"
+	t send-keys -t r C-u 'zz_pow'
+	wait_for pane_has r 'b\.lua:1'
+	sleep 0.5
+	t send-keys -t r Tab Tab Enter
+	if wait_for nvim_running r; then
+		sleep 1
+		t send-keys -t r Escape ":call writefile([len(getqflist())], '$W/qf2.out')" Enter
+		wait_for test -s "$W/qf2.out"
+		t send-keys -t r Escape ':qa!' Enter
+	fi
+	got=$(cat "$W/qf2.out" 2>/dev/null)
+	if [ "$got" = 2 ]; then
+		result rgi-marked PASS "Tab, Tab, Enter: nvim with the 2 marked hits in the quickfix list"
+	else
+		result rgi-marked FAIL "quickfix entries: '${got:-none}'"
+	fi
+	wait_for nvim_gone r
+	# From rihla's tmux popup: the hit opens in a new tmux window, the popup goes away.
+	t send-keys -t r C-u "RIHLA_OPEN=window rgi 'zz_pow -- .lua'" Enter
+	wait_for pane_has r 'b\.lua:1'
+	sleep 0.5
+	t send-keys -t r Enter
+	if wait_for two_windows r && wait_for nvim_running r; then
+		result rgi-window PASS "RIHLA_OPEN=window: Enter opens nvim in a new tmux window"
+	else
+		result rgi-window FAIL "windows: $(t list-windows -t r -F '#{window_name}' 2>/dev/null | tr '\n' ' ')"
+	fi
+	t kill-window -t r >/dev/null 2>&1
+	sleep 0.5
+	# rihla grep: the same, without the shell layer's functions.
+	t send-keys -t r C-u "clear; rihla grep 'zz_pow -- .lua'" Enter
+	if wait_for pane_has r 'b\.lua:1' && ! pane_has r 'a\.py:1'; then
+		result rihla-grep PASS "rihla grep starts rgi"
+	else
+		result rihla-grep FAIL "$(t capture-pane -p -t r | grep -v '^$' | head -n 6 | tr '\n' '|')"
+	fi
+	t send-keys -t r Escape
+	if t list-keys 2>/dev/null | grep -q 'rgi'; then
+		result tmux-search-key PASS "prefix + / is bound to rgi"
+	else
+		result tmux-search-key FAIL "no rgi binding in tmux"
+	fi
+	t kill-server >/dev/null 2>&1
+}
 
 layer_on() { # layer_on bash|zsh
 	k=$1 sh=$(command -v "$1")
@@ -520,6 +612,7 @@ case " $LAYER_ON " in
 *) echo "== bash: no ble.sh here (bash 3, or no xz to unpack it, or no ps), so no suggestions or highlighting to test" ;;
 esac
 search_checks "$(command -v bash)" bash
+rgi_checks "$(command -v bash)"
 # With the layer on, the shell in tmux is still the shell outside it.
 parity "$(command -v bash)" bash-layer
 if [ -n "$zsh_bin" ]; then

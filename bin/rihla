@@ -2288,6 +2288,11 @@ Usage: rihla <command> [options]
   icons [nerd|ascii|auto]
                      show or set the icon mode (Nerd Font glyphs or plain text); auto
                      asks your terminal (works over SSH) or shows you sample glyphs
+  grep [PATTERN [rg options, paths]]
+                     search inside files as you type, anywhere (rgi): type
+                     "TODO -- .py !tests/ ~/src" to filter; Enter opens nvim at the hit
+  find [PATTERN [PATH...]]
+                     find a file by name, anywhere, and open it in nvim (ff)
   cheat [nvim|tmux]  show the cheat sheets
   learn [next|prev|done|list|reset|N]
                      open your current lesson in nvim (list prints them here)
@@ -2311,6 +2316,8 @@ main() {
 	icons) cmd_icons "$@" ;;
 	cheat) cmd_cheat "$@" ;;
 	learn) cmd_learn "$@" ;;
+	grep) PATH="$BIN:$PATH" exec sh "$RIHLA_HOME/shell/bin/rgi" "$@" ;;
+	find) PATH="$BIN:$PATH" exec sh "$RIHLA_HOME/shell/bin/ff" "$@" ;;
 	version | --version | -V) cmd_version ;;
 	start) start_here ;;
 	help | -h | --help) usage ;;

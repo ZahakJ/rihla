@@ -1,9 +1,13 @@
 #!/bin/sh
-# preview PATH [LINE]: what fzf shows beside the list in rgi, ff, Ctrl-T and Alt-C. A file
-# with line numbers, from a little above LINE with LINE marked (bat draws it when you have
-# bat); a directory's entries. Plain sh, awk and grep, so it works on any machine.
+# preview PATH [LINE [PATTERN [FLAGS]]]: what fzf shows beside the list in rgi, ff, Ctrl-T
+# and Alt-C. A file with line numbers, from a little above LINE with LINE marked (bat draws
+# it when you have bat); with PATTERN (rgi) the matches in red, by ripgrep, FLAGS saying
+# regex (r), case-sensitive (c) and whole word (w) as in rgi. A directory's entries. Plain
+# sh, awk and grep otherwise, so it works on any machine.
 f=${1:-}
 line=${2:-0}
+pat=${3:-}
+flags=${4:-r}
 [ -n "$f" ] || exit 0
 # fzf lists may show the home directory as ~ (a literal tilde here).
 # shellcheck disable=SC2088
@@ -28,6 +32,22 @@ end=$((start + h + 20))
 if [ -s "$f" ] && ! LC_ALL=C grep -qI . "$f" 2>/dev/null; then
 	echo "binary file, $(wc -c <"$f" | tr -d ' ') bytes"
 	exit 0
+fi
+# The hit's line number in yellow on a raised background, the matches in red.
+if [ -n "$pat" ] && command -v rg >/dev/null 2>&1; then
+	set -- --no-config --color=always --colors=match:fg:red --colors=match:style:bold --passthru --no-line-number
+	case $flags in *r*) ;; *) set -- "$@" --fixed-strings ;; esac
+	case $flags in *c*) set -- "$@" --case-sensitive ;; *) set -- "$@" --smart-case ;; esac
+	case $flags in *w*) set -- "$@" --word-regexp ;; esac
+	out=$(rg "$@" -e "$pat" -- "$f" 2>/dev/null | awk -v s="$start" -v e="$end" -v l="$line" '
+		NR < s { next }
+		NR > e { exit }
+		NR == l { printf "\033[48;5;237m\033[38;5;223m%5d\033[0m %s\n", NR, $0; next }
+		{ printf "\033[38;5;243m%5d\033[0m %s\n", NR, $0 }')
+	if [ -n "$out" ]; then
+		printf '%s\n' "$out"
+		exit 0
+	fi
 fi
 for b in bat batcat; do
 	if command -v "$b" >/dev/null 2>&1; then

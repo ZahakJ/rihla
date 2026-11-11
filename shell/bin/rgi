@@ -1,47 +1,248 @@
 #!/bin/sh
-# rgi [PATTERN [rg options and paths...]]: search inside files as you type. PATTERN and what
-# you type are regular expressions (ripgrep: smart case, hidden files, .git, node_modules
-# and the like left out, see shell/ripgreprc). The file around each hit shows beside the
-# list. Enter opens the hit in nvim at its line and column; Ctrl-Q opens nvim with every
-# hit in the quickfix list (]q and [q step through them). Examples:
+# rgi [PATTERN [rg options and paths...]]: search inside files as you type, anywhere. PATTERN
+# and what you type are regular expressions (ripgrep: smart case, hidden files, .git,
+# node_modules and the like left out, see shell/ripgreprc). The file around each hit shows
+# beside the list, the match marked. Examples:
 #   rgi                       start empty and type
 #   rgi 'def \w+_test' src    only under src/
-#   rgi TODO -g '*.py'        only Python files (-t py works too)
+#   rgi TODO -g '*.py' ~      Python files in your home (-t py works too)
+#   rgi TODO /                the whole disk: local disks only, no /proc, /sys, /dev, /run
+# After " -- " in what you type, change where and in which files; the search stays:
+#   TODO -- .py !tests/       Python files, not under tests/
+#   TODO -- ~/src .lua .vim   Lua and Vim files under ~/src (-t lua, -g GLOB, -U work too)
+# Keys: Enter opens the hit in nvim at its line and column (Tab marks several: Enter puts
+# them in the quickfix list); Ctrl-Q every hit to the quickfix list (]q and [q step through
+# them); Ctrl-G refines the hits by typing (fuzzy) and back; Alt-R regex or plain text,
+# Alt-C case, Alt-W whole word, Alt-H hidden files, Alt-I ignored files, Alt-F symlinks;
+# Ctrl-P / Ctrl-N earlier searches. In your home or / hidden files and symlinks start off.
+# Without ripgrep, grep -r does the searching (no toggles but plain text and word).
 here=$(cd "$(dirname "$0")" && pwd -P)
-for c in rg fzf; do
-	command -v "$c" >/dev/null 2>&1 || {
-		echo "rgi: needs $c (rihla install brings it)" >&2
-		exit 1
-	}
-done
+self=$here/rgi
 if [ -z "${RIPGREP_CONFIG_PATH:-}" ] && [ -r "$here/../ripgreprc" ]; then
 	RIPGREP_CONFIG_PATH=$here/../ripgreprc
 	export RIPGREP_CONFIG_PATH
 fi
 q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+has() { case $(cat "$RGI_STATE/flags" 2>/dev/null) in *"$1"*) return 0 ;; esac; return 1; }
+
+# The whole disk: its top folders and the local disks mounted below them, each searched
+# without crossing into another mount (so no /proc, /sys, network shares, nothing twice).
+disk_roots() {
+	for d in /*; do
+		[ -d "$d" ] && [ ! -h "$d" ] || continue
+		case $d in /proc | /sys | /dev | /run | /lost+found) continue ;; esac
+		printf '%s\n' "$d"
+	done
+	[ -r /proc/self/mounts ] && awk '
+		$3 ~ /^(ext[234]|xfs|btrfs|zfs|f2fs|jfs|reiserfs|bcachefs|vfat|exfat|ntfs|ntfs3|fuseblk)$/ {
+			m = $2; gsub(/\\040/, " ", m)
+			if (m ~ /^\/[^\/]+\/./ && m !~ /^\/(proc|sys|dev|run)\//) print m
+		}' /proc/self/mounts
+}
+
+# The search itself (fzf reloads it): rgi --rgi-search QUERY.
+search() {
+	qy=$1
+	pat=$qy scope=
+	case $qy in *" -- "*)
+		pat=${qy%% -- *}
+		scope=${qy#* -- }
+		;;
+	esac
+	[ -n "$pat" ] || exit 0
+	printf '%s' "$pat" >"$RGI_STATE/pat"
+	disk=
+	if command -v rg >/dev/null 2>&1; then
+		set -- --column --line-number --no-heading --color=always --colors=path:fg:blue \
+			--colors=line:fg:white --colors=column:fg:white --colors=match:fg:red --colors=match:style:bold
+		has r || set -- "$@" --fixed-strings
+		has c && set -- "$@" --case-sensitive
+		has w && set -- "$@" --word-regexp
+		if has h; then set -- "$@" --hidden; else set -- "$@" --no-hidden; fi
+		if has f; then set -- "$@" --follow; else set -- "$@" --no-follow; fi
+		has i && set -- "$@" --no-ignore
+		set -- "$@" -e "$pat"
+		rgf=
+	else
+		# No ripgrep: grep -r, the column set to 1. Plain text and whole word still apply.
+		set -- -rnIH --exclude-dir=.git --exclude-dir=node_modules
+		if has r; then set -- "$@" -E; else set -- "$@" -F; fi
+		has w && set -- "$@" -w
+		case $pat in *[[:upper:]]*) ;; *) has c || set -- "$@" -i ;; esac
+		set -- "$@" -e "$pat"
+		rgf="grep"
+	fi
+	# The scope typed after " -- ": folders, .ext, globs, !excludes, -t types, -flags.
+	sdirs=
+	set -f
+	nextv=
+	for tok in $scope; do
+		if [ -n "$nextv" ]; then
+			[ -z "$rgf" ] && set -- "$@" "$nextv" "$tok"
+			nextv=
+			continue
+		fi
+		# shellcheck disable=SC2088 # a literal ~ typed into fzf
+		case $tok in "~" | "~/"*) tok=$HOME${tok#"~"} ;; esac
+		case $tok in
+		-t | -T) nextv=$tok ;;
+		-*) [ -z "$rgf" ] && set -- "$@" "$tok" ;;
+		!?*)
+			if [ -z "$rgf" ]; then set -- "$@" -g "$tok"
+			else
+				x=${tok#!}
+				case $x in */) set -- "$@" "--exclude-dir=${x%/}" ;; *) set -- "$@" "--exclude=$x" ;; esac
+			fi
+			;;
+		*)
+			if [ -d "$tok" ]; then
+				sdirs=1
+				if [ "$tok" = / ]; then disk=1; else set -- "$@" "$tok"; fi
+			elif [ -z "$rgf" ]; then
+				case $tok in .[A-Za-z0-9_+-]*) set -- "$@" -g "*$tok" ;; *) set -- "$@" -g "$tok" ;; esac
+			else
+				case $tok in .[A-Za-z0-9_+-]*) set -- "$@" "--include=*$tok" ;; *) set -- "$@" "--include=$tok" ;; esac
+			fi
+			;;
+		esac
+	done
+	set +f
+	# The options and paths rgi was started with; folders typed after " -- " replace its
+	# folders.
+	npath=0
+	while IFS= read -r a; do
+		if [ -d "$a" ]; then
+			[ -n "$sdirs" ] && continue
+			npath=$((npath + 1))
+			if [ "$a" = / ]; then disk=1; continue; fi
+		fi
+		case $rgf$a in grep-*) continue ;; esac
+		set -- "$@" "$a"
+	done <"$RGI_STATE/args"
+	if [ -n "$disk" ]; then
+		while IFS= read -r d; do set -- "$@" "$d"; done <<EOF
+$(disk_roots)
+EOF
+		[ -z "$rgf" ] && set -- "$@" --one-file-system --no-follow --no-messages
+	fi
+	if [ -n "$rgf" ]; then
+		[ "$npath" -gt 0 ] || [ -n "$sdirs" ] || set -- "$@" .
+		grep "$@" 2>/dev/null </dev/null | sed 's/^\([^:]*:[0-9][0-9]*:\)/\11:/'
+		exit 0
+	fi
+	# </dev/null: with no path given, rg would otherwise read fzf's pipe.
+	exec rg "$@" </dev/null
+}
+
+# The prompt shows what is switched away from the defaults, as the editor's title does.
+prompt() {
+	p=rg
+	command -v rg >/dev/null 2>&1 || p="grep"
+	has r && p="$p .*"
+	has c && p="$p Aa"
+	has w && p="$p ab|"
+	has h || p="$p -hidden"
+	has f || p="$p -links"
+	has i && p="$p +ignored"
+	printf '%s> ' "$p"
+}
+
+toggle() {
+	fl=$(cat "$RGI_STATE/flags")
+	case $fl in *"$1"*) fl=$(printf '%s' "$fl" | tr -d "$1") ;; *) fl=$fl$1 ;; esac
+	printf '%s\n' "$fl" >"$RGI_STATE/flags"
+}
+
+# Ctrl-G: from the live search to refining its hits (fzf matching), and back.
+mode() {
+	if [ "$(cat "$RGI_STATE/mode")" = rg ]; then
+		echo fzf >"$RGI_STATE/mode"
+		printf '%s' "$1" >"$RGI_STATE/query"
+		echo "unbind(change)+change-prompt(refine> )+enable-search+clear-query"
+	else
+		echo rg >"$RGI_STATE/mode"
+		echo "rebind(change)+change-prompt($(prompt))+disable-search+transform-query(cat $(q "$RGI_STATE/query"))"
+	fi
+}
+
+# Enter / Ctrl-Q: one hit opens at its line and column, several go to the quickfix list.
+# Inside rihla's tmux popup (RIHLA_OPEN=window) the editor opens in a new tmux window.
+open() {
+	list=$1
+	SHELL=${RGI_SHELL:-/bin/sh}
+	export SHELL
+	ed="vi"
+	for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
+	n=$(grep -c . "$list" 2>/dev/null)
+	if [ "${n:-0}" -le 1 ]; then
+		line=$(head -n 1 "$list")
+		f=${line%%:*} rest=${line#*:}
+		l=${rest%%:*} rest=${rest#*:}
+		c=${rest%%:*}
+		[ -n "$f" ] || exit 0
+		if [ "$ed" = vi ]; then set -- "$ed" "+$l" "$f"; else set -- "$ed" "+call cursor($l,$c)" "$f"; fi
+	else
+		qf=$(mktemp "${TMPDIR:-/tmp}/rihla-rgi-qf.XXXXXX") && cp "$list" "$qf" || exit 1
+		# Read once the editor is up (not with -q, which reads them before plugins load),
+		# the list open below, the cursor on the first hit.
+		if [ "$ed" = vi ]; then set -- "$ed" -q "$qf"; else set -- "$ed" "+cfile $qf" "+call delete('$qf')" +copen "+wincmd p"; fi
+	fi
+	rm -rf "$RGI_STATE"
+	if [ "${RIHLA_OPEN:-}" = window ] && [ -n "${TMUX:-}" ]; then
+		exec tmux new-window -c "$PWD" "$@"
+	fi
+	exec "$@"
+}
+
+case ${1:-} in
+--rgi-search) search "${2:-}" ;;
+--rgi-prompt) prompt; exit 0 ;;
+--rgi-toggle) toggle "$2"; exit 0 ;;
+--rgi-mode) mode "${2:-}"; exit 0 ;;
+--rgi-open) open "$2" ;;
+esac
+
+command -v fzf >/dev/null 2>&1 || {
+	echo "rgi: needs fzf (rihla install brings it)" >&2
+	exit 1
+}
+command -v rg >/dev/null 2>&1 || echo "rgi: no ripgrep here, searching with grep -r (rihla install brings rg)" >&2
+tmp=${TMPDIR:-/tmp}
+# Searches cut short by a killed terminal leave their few bytes of state; clear old ones.
+find "$tmp" -maxdepth 1 -name 'rihla-rgi.*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+RGI_STATE=$(mktemp -d "$tmp/rihla-rgi.XXXXXX") || exit 1
+RGI_SHELL=${SHELL:-/bin/sh}
+export RGI_STATE RGI_SHELL
 query=${1:-}
 [ $# -gt 0 ] && shift
-rest=
-for a in "$@"; do rest="$rest $(q "$a")"; done
-ed="vi"
-for e in nvim vim; do command -v "$e" >/dev/null 2>&1 && ed=$e && break; done
-# Ctrl-Q: the hits as the quickfix list, read once the editor is up (not with -q, which
-# reads them before plugins load), the list open below, the cursor on the first hit.
-qf="+'cfile {+f}' +copen '+wincmd p'"
-[ "$ed" = vi ] && qf="-q {+f}"
-# Enter: the hit's line and column (rg --column counts bytes from 1, as cursor() does);
-# fzf quotes the fields, +0 makes them numbers. Plain vi takes the line only.
-at="'+call cursor({2}+0,{3}+0)'"
-[ "$ed" = vi ] && at="+{2}"
-# fzf runs these with $SHELL; they are sh. The editor gets your shell back.
-sh_back="SHELL=$(q "${SHELL:-/bin/sh}")"
-rg="rg --column --line-number --no-heading --color=always --colors=path:fg:blue --colors=line:fg:white --colors=column:fg:white --colors=match:fg:red --colors=match:style:bold"
-# </dev/null: with no path given, rg would otherwise read fzf's pipe.
-search="[ -n {q} ] && $rg -- {q}$rest </dev/null || true"
-SHELL=/bin/sh exec fzf --ansi --disabled --multi --query "$query" --prompt 'rg> ' --delimiter : \
-	--height=100% --header 'Enter: open   Ctrl-Q: all to quickfix   Esc: quit' \
+flags=rhf # regex, hidden files, symlinks
+: >"$RGI_STATE/args"
+for a in "$@"; do
+	printf '%s\n' "$a" >>"$RGI_STATE/args"
+	case $a in / | "$HOME" | "$HOME/" | "~") flags=r ;; esac
+done
+echo "$flags" >"$RGI_STATE/flags"
+echo rg >"$RGI_STATE/mode"
+set --
+hist=${XDG_STATE_HOME:-$HOME/.local/state}/rihla
+mkdir -p "$hist" 2>/dev/null && hist="--history=$hist/rgi-history" || hist=
+me="sh $(q "$self")"
+st=$(q "$RGI_STATE")
+search="$me --rgi-search {q}"
+done_="execute-silent(rm -rf $st)+abort"
+for k in r c w h i f; do
+	set -- "$@" --bind "alt-$k:execute-silent($me --rgi-toggle $k)+transform-prompt($me --rgi-prompt)+reload($search)"
+done
+# fzf runs these with $SHELL; they are sh. The editor gets your shell back (RGI_SHELL).
+# shellcheck disable=SC2086 # $hist is one word or none
+SHELL=/bin/sh exec fzf "$@" $hist --ansi --disabled --multi --query "$query" --prompt "$(prompt)" \
+	--delimiter : --height=100% \
+	--header "$(printf '%s\n%s' 'Enter: open (Tab marks several)  Ctrl-Q: all to quickfix  Ctrl-G: refine  Esc: quit' \
+		"Alt-R regex  Alt-C case  Alt-W word  Alt-H hidden  Alt-I ignored   TODO -- .py !tests/ ~/src")" \
 	--bind "start:reload:$search" --bind "change:reload:sleep 0.05; $search" \
-	--preview "sh $(q "$here/preview") {1} {2}" \
+	--bind "ctrl-g:transform:$me --rgi-mode {q}" \
+	--bind "esc:$done_" --bind "ctrl-c:$done_" \
+	--preview "sh $(q "$here/preview") {1} {2} \"\$(cat $st/pat 2>/dev/null)\" \"\$(cat $st/flags 2>/dev/null)\"" \
 	--preview-window 'right,50%,border-left,<100(down,55%,border-top)' \
-	--bind "enter:become([ -n {1} ] && $sh_back exec $ed {1} $at)" \
-	--bind "ctrl-q:select-all+become($sh_back exec $ed $qf)"
+	--bind "enter:become([ -n {1} ] && $me --rgi-open {+f})" \
+	--bind "ctrl-q:select-all+become($me --rgi-open {+f})"
