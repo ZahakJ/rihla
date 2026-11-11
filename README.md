@@ -32,6 +32,11 @@ the Vim way one step at a time.
   installs its language server and formatter in the background, and its
   tree-sitter parser when a C compiler is present:
   completion, go to definition, rename, problems inline, format on demand.
+- **Search like an IDE, anywhere.** Live ripgrep in the project, your home, another
+  repo or the whole disk (no `/proc`, no network mounts), with extension, glob and
+  exclude filters you change while the query stays, toggles for regex, case, word,
+  hidden and ignored files, refining the hits by typing, and the quickfix list. The
+  same from the shell or a tmux key (`rgi`, `prefix /`), without opening the editor.
 - **The rest of the IDE.** Replace across files with a preview, git changes in
   the gutter and lazygit, a three-way merge view and in-file conflict keys, a
   debugger on `F5`/`F9`/`F10`/`F11`, terminals at the bottom or floating.
@@ -101,6 +106,8 @@ rihla update        move rihla, its tools and plugins to the current pins
 rihla uninstall     remove everything and restore the previous config
 rihla check         check versions, PATH, clipboard, colours, icons, plugins
 rihla learn         open your current lesson (next, prev, list, reset, N)
+rihla grep          search text in files as you type, anywhere (rgi)
+rihla find          find a file by name, anywhere (ff)
 rihla cheat         cheat sheets for nvim and tmux
 rihla icons         nerd, ascii or auto
 rihla shell         prompt, suggestions, fzf keys for zsh or bash (--off to undo)
@@ -116,7 +123,7 @@ Leader is `Space`. Vim's own keys are left alone. Full lists:
 | Key | Does |
 | --- | --- |
 | `Space f f` or `Ctrl-p` | find a file |
-| `Space f g` | search text in the project |
+| `Space f g` | search text in the project; `Alt-s` for any folder and file filters (`~ .py !tests/`) |
 | `Space r p` / `Space r r` | replace across files / in this file |
 | `Space e` | file tree |
 | `Alt-1`..`Alt-9`, `Space b b` | go to tab N, pick an open file |

@@ -30,7 +30,7 @@ Keys in **plain Vim** (no plugin, work on any server) are marked with a dot: ·
 | VS Code | rihla |
 |---|---|
 | Ctrl+P: open a file by name | `Ctrl-p` or `Space f f` (open and recent files first) |
-| Ctrl+Shift+F: search in files (regex) | `Space f g`; in it `Alt-r` regex, `Alt-c` case, `Alt-w` word, `Alt-s` folder/glob, `Ctrl-q` quickfix |
+| Ctrl+Shift+F: search in files (regex) | `Space f g`; in it `Alt-s` where and which files, `Alt-r` regex, `Alt-c` case, `Alt-w` word, `Ctrl-g` refine, `Ctrl-q` quickfix |
 | Ctrl+Shift+H: replace in files | `Space r p` (preview first, `\r` replaces all, `Space r u` undoes); `Space r r` in this file |
 | Ctrl+`: terminal | ``Ctrl-\`` bottom, `Space t t` floating; `Space t s` runs the line or selection there |
 | Breadcrumbs, outline, folding | the bar above the file; `Space c s` outline; `za` or `Space z` fold |
@@ -92,10 +92,16 @@ Keys in **plain Vim** (no plugin, work on any server) are marked with a dot: ·
 | `cgn` then `.` · | change the next match, `.` repeats on the next one (multi-cursor, Vim style) |
 | `Space r r` | `:%s` with the word under the cursor filled in (exact case, `\C`): type the new text, `Enter`, then `y`/`n` at each match (on a selection: the selected text) |
 | `Space f g` | grep the project (live, regex); `text -- -g *.ts` searches only `.ts` files |
-| `Space f G` | grep, asking first where: a folder, a glob or both (`src **/*.ts`) |
+| `Space f G` | grep, asking first where and which files (the scope line below) |
 | `Space f w` | grep the word under the cursor or the selection |
-| `Alt-r` `Alt-c` `Alt-w` `Alt-s` in grep | regex / case-sensitive / whole word / folder or glob; the title shows `.*` `Aa` `ab\|` |
-| `Ctrl-q` in a picker | send results to the quickfix list (`]q` `[q` walk it), then `:cdo s/a/b/` |
+| `Alt-s` in grep or find file | change where and which files; the query stays. The scope line: folders (`src`, `~`, `/`, another repo), `.py .ts` extensions, `*.test.ts` globs, `!tests/` excludes, `-t py` ripgrep types, any rg flag (`-U` multiline, `-u`). `Tab` completes a folder |
+| `Alt-r` `Alt-c` `Alt-w` in grep | regex or plain text / case-sensitive / whole word; the title shows `.*` `Aa` `ab\|` |
+| `Alt-h` `Alt-i` `Alt-f` in grep or find file | hidden files / gitignored files / symlinks; the title shows `-hidden` `+ignored` `-links` when not the default. In `~` and `/` hidden files and symlinks start off; `/` skips `/proc`, `/sys`, `/dev`, `/run` and network mounts |
+| `Ctrl-g` in grep | refine: stop searching and filter the hits as you type (`file:name` filters by file); `Ctrl-g` again goes back |
+| `Tab` / `Ctrl-q` in a picker | mark hits / send the marked ones (or all) to the quickfix list (`]q` `[q` walk it), then `:cdo s/a/b/` |
+| `Ctrl-v` `Ctrl-s` `Ctrl-t` in a picker | open in a split / horizontal split / tab |
+| `Ctrl-Up` `Ctrl-Down` in a picker | earlier / later searches; `Space f R` reopens the last search as you left it |
+| `:Grep ~/src .py -- TODO` | grep from the command line (scope, then the query after `--`); `:Find ~ .lua` finds files. From the shell: `nvim +'Grep / .conf -- listen'` |
 | `Space r p` | replace across files (grug-far): every change previewed, `\r` replaces all, `Space r u` puts the files back |
 | `Space r f` | the same, in this file only |
 
@@ -103,15 +109,17 @@ Keys in **plain Vim** (no plugin, work on any server) are marked with a dot: ·
 
 | Key | Does |
 |---|---|
-| `Space f f` or `Ctrl-p` | find file (open and recent files first, hidden files too) |
+| `Space f f` or `Ctrl-p` | find file (open and recent files first, hidden files too); `Alt-s` searches another folder |
+| `Space f F` | find file, asking first where and which files (`~/src .py !tests/`) |
 | `Space f r` | recent files |
 | `Space f b` | open buffers |
-| `Space f g` / `Space f G` | grep text / grep in a folder or glob |
+| `Space f g` / `Space f G` | grep text / grep asking where (any folder, `.ext`, globs, `!excludes`) |
 | `Space f s` / `Space f S` | symbols in file / in workspace |
 | `Space c s` | outline: this file's symbols in a panel on the right |
 | `Space f d` | diagnostics |
 | `Space f h` `Space f k` `Space f c` | help, keymaps, commands |
-| `Space f R` | resume the last picker |
+| `Space f R` | resume the last picker (query, filters and toggles as you left them) |
+| `Space f /` | fuzzy search the lines of this file |
 | `Space f u` | your own overrides in `~/.config/rihla` |
 
 ## Files, buffers, windows

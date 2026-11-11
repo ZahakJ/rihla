@@ -51,8 +51,8 @@ cursor between the brackets, `r` then `x`.
 - [ ] `Space f g`, type `def \w+` (a regex: every function). The preview shows each hit.
 - [ ] Press `Alt-w` (whole word) and `Alt-c` (match case): the title shows `ab|` and `Aa`.
       Press them again to turn them off.
-- [ ] Type ` -- -g *.py` after the search: only Python files. `Alt-s` asks for a
-      folder or glob instead.
+- [ ] Type ` -- -g *.py` after the search: only Python files. Or press `Alt-s` and
+      type `.py !tests/`: Python files, not under `tests/`, and the search stays.
 - [ ] `Ctrl-q`: every hit goes to the quickfix list. `]q` and `[q` walk it,
       `Space x q` closes it. (Lesson 11 does more with this list.)
 
@@ -135,7 +135,7 @@ When you are done, `:cd -` and `Enter` returns to the previous folder.
 
 Then press `Space h n` for lesson 8.
 
-> Tip: in `Space f g`, `text -- -g *.ts` searches only TypeScript files; `Alt-s` asks for a folder or a glob.
+> Tip: in `Space f g`, `Alt-s` takes any folder (`~`, `/`, another repo), `.ts`, `!dist/`; `Ctrl-g` then filters the hits as you type.
 
 > Tip: `Space t s` sends the current line, or the selected lines, to the terminal and runs them.
 

@@ -139,7 +139,7 @@ home. A default install does not turn it on. It adds one line to rihla's block i
 | Syntax highlighting | zsh-syntax-highlighting 0.8.0 (lines over 300 characters, mostly pastes, are left plain) | ble.sh |
 | Completion | menu completion, case-insensitive, zsh-completions 0.36.0 | lists on the first Tab, ignores case (only without your own `~/.inputrc`) |
 | fzf keys | Ctrl-R history, Ctrl-T files, Alt-C directories, `**<Tab>`, listing with fd and the shared defaults, with a preview (the fzf rihla installs) | the same (with ble.sh, bound in its keymaps too) |
-| Search | `rgi` (search file contents as you type, Enter opens nvim at the hit, Ctrl-Q fills the quickfix list), `ff`/`fdi` (find a file, open it), `rg` and `fd` with the defaults the editor uses ([shell.md](shell.md#defaults)) | the same |
+| Search | `rgi` (search file contents as you type, in any folder, with filters and toggles; Enter opens nvim at the hit, Ctrl-Q fills the quickfix list), `ff`/`fdi` (find a file, open it), `rg` and `fd` with the defaults the editor uses ([shell.md](shell.md#defaults)) | the same |
 | zoxide 0.10.0 | `z part-of-a-dir` | the same |
 | History | shared between terminals, 50000 lines, no duplicates | appended from every terminal, 50000 lines, no duplicates |
 | Keys | Home, End, Delete, Ctrl-Left/Right; Up/Down find earlier commands starting with what you typed | the same |

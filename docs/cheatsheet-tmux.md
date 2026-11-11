@@ -88,6 +88,8 @@ SSH too (OSC 52; most current terminals allow it). When a clipboard tool is pres
 | `prefix :` | type a tmux command, e.g. `:kill-session` |
 | `prefix r` | reload the config |
 | `prefix t` | big clock |
+| `prefix /` | search text in files below the pane's folder (`rgi`; the hit opens in nvim in a new window) |
+| `prefix F` | find a file by name below the pane's folder (`ff`) |
 
 Your own settings go in `~/.config/rihla/tmux/local.conf`; it is loaded last, so it can
 override anything here. `rihla install` and `rihla update` never touch it.
@@ -99,7 +101,9 @@ override anything here. `rihla install` and `rihla update` never touch it.
 | `rihla cheat tmux` | print this sheet |
 | `rihla check` | check tmux version, clipboard, colours |
 | `rihla icons nerd` / `ascii` | status bar with Nerd Font glyphs, or plain |
+| `rihla grep` / `rihla find` | search text in files / find a file, anywhere, as `prefix /` and `prefix F` do |
 
 Older tmux: rihla installs tmux 3.6b on Linux when the system one is older than 3.2. With
 an older tmux the config still loads; the menu and popups are missing and `prefix h` /
-`prefix H` open the cheat sheet in a new window instead.
+`prefix H` open the cheat sheet in a new window instead (`prefix /` and `prefix F` too:
+the search in a new window).

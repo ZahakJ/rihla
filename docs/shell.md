@@ -17,13 +17,34 @@ Enter to pick, Esc to leave.
 | Ctrl-T | pick files and folders below here (fd: hidden files in, `.git` and `node_modules` out), with a preview; pasted where the cursor is |
 | Alt-C | pick a folder below here and `cd` into it, with a preview |
 | `**` then Tab | the same list for any command's argument: `nvim src/**<Tab>`, `cd **<Tab>` (zsh and bash) |
-| `rgi [PATTERN] [rg options, paths]` | search inside files as you type, a regular expression; the file around each hit beside the list. Enter opens nvim at that line; Ctrl-Q opens nvim with every hit in the quickfix list (`]q` / `[q` step through them) |
-| `ff [PATTERN] [PATH]`, `fdi` | find a file by name (regular expression), narrow by typing, Enter opens it in nvim (Tab marks several) |
+| `rgi [PATTERN] [rg options, paths]` | search inside files as you type, a regular expression, in any folder (`~`, `/`, another repo); the file around each hit beside the list, the match in red. Enter opens nvim at that line (Tab-marked hits: all of them in the quickfix list); Ctrl-Q opens nvim with every hit in the quickfix list (`]q` / `[q` step through them). Keys and filters below |
+| `ff [PATTERN] [PATH...]`, `fdi` | find a file by name (regular expression), in any folder, narrow by typing, Enter opens it in nvim (Tab marks several) |
+| `rihla grep ...`, `rihla find ...` | the same two, without the shell layer (anywhere `rihla` is on PATH) |
+| tmux `prefix /`, `prefix F` | `rgi` / `ff` in a popup from the pane's folder; the hit opens in nvim in a new window |
 | `z part-of-a-dir` | jump to a folder you have been in before (zoxide) |
 | `rg`, `fd` | ripgrep and fd with the shared defaults below |
 
 Examples: `rgi 'def \w+_test' tests/`, `rgi TODO -g '*.py'`, `rgi -t c 'malloc\('`,
-`ff '\.ya?ml$'`, `ff config src`.
+`rgi listen /etc`, `rgi TODO ~`, `ff '\.ya?ml$'`, `ff config src`, `ff -e conf '' /etc`, `ff nginx /`.
+
+In `rgi`, what follows ` -- ` in the query says where and in which files, the same scope
+line as the editor's `Alt-s`; change it and the search runs again with the rest of the query
+kept: `TODO -- .py !tests/` (Python files, not under `tests/`), `TODO -- ~/src .lua .vim`,
+`TODO -- -t rust -U` (a ripgrep type, multiline), `TODO -- /` (the whole disk).
+
+| Key in `rgi` | What it does |
+| --- | --- |
+| Alt-R, Alt-C, Alt-W | regex or plain text, case-sensitive, whole word (the prompt shows `.*` `Aa` `ab\|`) |
+| Alt-H, Alt-I, Alt-F | hidden files, gitignored files, symlinks (the prompt shows `-hidden` `+ignored` `-links` when not the default) |
+| Ctrl-G | refine: stop searching, filter the hits as you type; Ctrl-G again goes back to the search |
+| Tab, Enter / Ctrl-Q | mark hits, open them (several: in the quickfix list) / every hit to the quickfix list |
+| Ctrl-P, Ctrl-N | earlier / later searches (kept in `~/.local/state/rihla/rgi-history`) |
+
+Large trees: in your home and on `/` hidden files and symlinks start off (Alt-H, Alt-F turn
+them on). `/` is searched as its top folders and the local disks mounted below them, each
+without crossing into another mount: no `/proc`, `/sys`, `/dev`, `/run`, no network shares,
+nothing twice. Esc stops a search at once. Without ripgrep `rgi` searches with `grep -r`
+(plain text, whole word, `.ext` and `!excludes` still apply); without fd `ff` uses `find`.
 
 ## Defaults
 

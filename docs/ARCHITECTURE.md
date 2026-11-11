@@ -270,7 +270,11 @@ user's fish config are not changed.
 
 `shell/ripgreprc` and `shell/fdignore` are the search defaults for both the shell
 (`RIPGREP_CONFIG_PATH`, `fd --ignore-file`) and the editor's pickers. `shell/bin/rgi` and
-`ff` are fzf front ends over rg and fd that open hits in nvim.
+`ff` are fzf front ends over rg and fd that open hits in nvim; `rihla grep` / `rihla find` and
+tmux's `prefix /` / `prefix F` (a popup, the editor in a new window) run them without the shell
+layer. The editor (`nvim/lua/rihla/find.lua`) and `rgi` read the same scope line (folders,
+`.ext`, globs, `!excludes`, `-t` types, rg flags) and search `/` the same way: its top folders
+and local disks, one file system each, so never `/proc`, `/sys` or a network mount.
 
 ## Tests
 

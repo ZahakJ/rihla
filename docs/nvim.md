@@ -32,7 +32,7 @@ lack something.
 | bufferline.nvim | open files as tabs, like VS Code; hidden while only one file is open |
 | which-key.nvim | press Space and wait: every group and key is listed with a description |
 | indent-blankline.nvim | indent guides (box-drawing characters, safe in any font) |
-| snacks.nvim (only its picker) | fuzzy finding: files (fd), live grep (ripgrep) with regex / case / whole-word toggles and a folder or glob scope, recent files first, buffers, symbols, the command palette and `vim.ui.select`. Pure Lua, no compiler |
+| snacks.nvim (only its picker) | fuzzy finding: files (fd), live grep (ripgrep) with regex / case / whole-word / hidden / ignored / symlink toggles, a scope line (any folder including `~` and `/`, extensions, globs, excludes, rg types) changed while the query stays, refining the hits, recent files first, buffers, symbols, the command palette and `vim.ui.select`. Pure Lua, no compiler |
 | grug-far.nvim | replace across files with a preview of every change (`Space r p`); needs ripgrep |
 | diffview.nvim | the 3-way merge view (`Space g m`) and file history (`Space g h`); needs git 2.31+, says so otherwise |
 | dropbar.nvim | the breadcrumb above each file (folder > file > class > function), from LSP or tree-sitter |
@@ -138,7 +138,7 @@ When the machine lacks something:
 | Node.js | npm-based servers (TS, JSON, YAML, Bash, HTML, CSS, Docker) are skipped with one line saying so. Python still gets basedpyright (from PyPI, it carries its own Node; needs Python 3.10+), or else pylsp |
 | C compiler | one line, then regex highlighting for everything except the parsers Neovim ships (C, Lua, Markdown, Vim, help). The picker, breadcrumb (from the language server) and folds need none |
 | old glibc | after installing a prebuilt binary, rihla runs it once (`--version`); if it fails with a `GLIBC_x.y` error the server is not enabled and the message says to install it another way. A system binary on `PATH` is always preferred |
-| ripgrep / fd | file search uses `rg --files` or `find`; without ripgrep, `Space f g` asks for a pattern and runs `grep -r` into the quickfix list, and `Space r p` says it needs ripgrep (rihla installs both) |
+| ripgrep / fd | file search uses `rg --files` or `find`; without ripgrep, `Space f g` asks for a pattern and runs `grep -r` into the quickfix list (`Space f G` and `:Grep` still apply the folders, `.ext`, globs and excludes), and `Space r p` says it needs ripgrep (rihla installs both) |
 | git 2.31 | `Space g m` / `Space g h` (diffview) say they need it; conflicts in the file (`co` `ct` ...) need no git at all, `Space g x` works with any git |
 | lazygit | `Space g g` opens fugitive's `:Git` |
 | clipboard tool, over SSH or in tmux | yank goes through OSC 52 to your local clipboard; paste comes from Neovim's own register |
@@ -194,7 +194,7 @@ normal mode show the hint instead of moving. `Space t h` cycles off / hint / str
 | `nvim/tests/run.sh smoke` | startup is clean; every locked plugin is installed at its commit and loads; every `<leader>` key has a description; no Nerd Font glyph in ascii mode; the teaching UIs open. Runs in ascii and nerd mode |
 | `nvim/tests/run.sh keys` | every Space key named in `docs/`, `README.md` and the dashboard exists as a mapping |
 | `nvim/tests/run.sh learn` | lessons open in one window from every entry point, `Space h h` recovers from any layout, lesson copies never touch the repository, every popup closes with `q`, hints fit on one line |
-| `nvim/tests/run.sh find` | `Space f g` and `Space f f` find the expected line and file, with or without ripgrep and fd |
+| `nvim/tests/run.sh find` | `Space f g` and `Space f f` find the expected line and file, with or without ripgrep and fd; then grep and find file in another folder, `~` and `/` with extension, glob and exclude filters changed while the query stays, the hidden / ignored / symlink / regex toggles, `Ctrl-g` refine, marked hits to the quickfix list, `:Grep` and `:Find`, and that closing a search of `/` stops ripgrep |
 | `nvim/tests/run.sh habits` | the eight VS Code habits with their real keys: picker, live grep and its toggles, grug-far replace and undo, terminals, breadcrumb and folds, file tree, numbered and pinned tabs, a real git merge conflict |
 | `nvim/tests/run.sh lsp` | for Lua and Python: rihla installs the server, then it attaches, reports diagnostics, completes and answers hover |
 | `nvim/tests/run.sh dap` | for debugpy (Python) and codelldb (C; `RIHLA_DAP_ADAPTERS=debugpy,codelldb,gdb` adds gdb 14+): stops on a breakpoint, evaluates a variable, ends |
