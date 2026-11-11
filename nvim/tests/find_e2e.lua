@@ -122,11 +122,13 @@ local function hits(p, query, base)
   return names(p:items(), base)
 end
 
+-- Neovim lists child processes with ps; minimal images have none (then the check is skipped).
 local function rg_children()
   local n = 0
-  for _, pid in ipairs(vim.api.nvim_get_proc_children(vim.fn.getpid())) do
-    local info = vim.api.nvim_get_proc(pid)
-    if info and (info.name or ""):match("^rg") then
+  local ok, kids = pcall(vim.api.nvim_get_proc_children, vim.fn.getpid())
+  for _, pid in ipairs(ok and kids or {}) do
+    local okp, info = pcall(vim.api.nvim_get_proc, pid)
+    if okp and info and (info.name or ""):match("^rg") then
       n = n + 1
     end
   end
@@ -261,7 +263,8 @@ local function power(dir, has_rg)
     vim.env.HOME = real_home
     vim.wait(100)
 
-    local can_list, before = pcall(rg_children)
+    local can_list = vim.fn.has("win32") == 1 or vim.fn.executable("ps") == 1
+    local before = can_list and rg_children() or 0
     p = find.grep({ filters = "/", search = "zq_power_never_[0-9]{9}" })
     check("grep in /: the title says /", title_of(p):find("Grep in /", 1, true) ~= nil, title_of(p))
     if can_list then
@@ -275,7 +278,7 @@ local function power(dir, has_rg)
       check("grep in /: Esc while it runs stops ripgrep", started and stopped, ("started %s, rg left: %d"):format(tostring(started), rg_children()))
     else
       p:close()
-      results[#results + 1] = "note  this system cannot list child processes; the stop-on-Esc check is skipped"
+      results[#results + 1] = "note  no ps here, so Neovim cannot list child processes; the stop-on-Esc check is skipped"
     end
 
     -- :Grep with a scope and a query, from the command line (nvim +'Grep ... -- ...').

@@ -93,4 +93,4 @@ list "$@" | SHELL=/bin/sh fzf --multi --prompt 'file> ' \
 	--height=100% --header 'Enter: open   Tab: mark several   Esc: quit' \
 	--preview "sh $(q "$here/preview") {}" \
 	--preview-window 'right,55%,border-left,<100(down,50%,border-top)' \
-	--bind "enter:become(sh $(q "$here/ff") --ff-open {+f})"
+	--bind "enter:become(exec sh $(q "$here/ff") --ff-open {+f})"

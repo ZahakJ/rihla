@@ -234,6 +234,7 @@ for k in r c w h i f; do
 	set -- "$@" --bind "alt-$k:execute-silent($me --rgi-toggle $k)+transform-prompt($me --rgi-prompt)+reload($search)"
 done
 # fzf runs these with $SHELL; they are sh. The editor gets your shell back (RGI_SHELL).
+# Each become() execs, so the editor takes fzf's process (tmux names the window after it).
 # shellcheck disable=SC2086 # $hist is one word or none
 SHELL=/bin/sh exec fzf "$@" $hist --ansi --disabled --multi --query "$query" --prompt "$(prompt)" \
 	--delimiter : --height=100% \
@@ -244,5 +245,5 @@ SHELL=/bin/sh exec fzf "$@" $hist --ansi --disabled --multi --query "$query" --p
 	--bind "esc:$done_" --bind "ctrl-c:$done_" \
 	--preview "sh $(q "$here/preview") {1} {2} \"\$(cat $st/pat 2>/dev/null)\" \"\$(cat $st/flags 2>/dev/null)\"" \
 	--preview-window 'right,50%,border-left,<100(down,55%,border-top)' \
-	--bind "enter:become([ -n {1} ] && $me --rgi-open {+f})" \
-	--bind "ctrl-q:select-all+become($me --rgi-open {+f})"
+	--bind "enter:become([ -n {1} ] && exec $me --rgi-open {+f})" \
+	--bind "ctrl-q:select-all+become(exec $me --rgi-open {+f})"
